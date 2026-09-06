@@ -17,13 +17,10 @@ pub const H: i32 = 2008;
 pub const LW: f64 = 2008.0;
 pub const LH: f64 = 60.0;
 
-const WS_START: f64 = 24.0;
-const WS_W: f64 = 140.0;
-const WS_GAP: f64 = 12.0;
-const TH1_W: f64 = 140.0;
+const EDGE: f64 = 24.0;
+const WS_GAP: f64 = 12.0; // uniform inner gap shared by ALL buttons
+const SEC_GAP: f64 = 14.0; // gaps between strip sections
 const MENU_GAP: f64 = 12.0;
-const CTL_GAP: f64 = 16.0;
-const CTL_DEFAULT_W: f64 = 130.0;
 const FN_N: usize = 12;
 const FN_W: f64 = 158.0;
 const FN_GAP: f64 = 9.0;
@@ -31,13 +28,10 @@ const FN_GAP: f64 = 9.0;
 const PX_CELL: f64 = 9.0;
 const PX_GAP: f64 = 9.0;
 const CLK_W: f64 = 5.0 * 3.0 * PX_CELL + 4.0 * PX_GAP; // 171, full "HH:MM"
-const CLK_NUDGE: f64 = -5.0;
 // pet playground after the clock; weather sits past it, next to brightness
-const PET_GAP: f64 = 16.0;
 const PET_W: f64 = 240.0;
 // weather block fits 5 glyphs ("-12°C") so controls never shift
 const WTH_W: f64 = 5.0 * 3.0 * PX_CELL + 4.0 * PX_GAP; // 171
-const WTH_GAP: f64 = 16.0;
 
 pub const SL_TX0: f64 = 300.0;
 pub const SL_TX1: f64 = LW - 140.0;
@@ -46,10 +40,13 @@ const NERD: &str = "JetBrainsMono Nerd Font";
 const NEUTRAL_BG: Rgb = (0x18 as f64 / 255.0, 0x18 as f64 / 255.0, 0x20 as f64 / 255.0);
 
 /// Shared layout: render and hit-testing both use this.
+/// Every button (workspaces, controls, theme) shares one uniform width.
 #[derive(Debug, Clone)]
 pub struct Layout {
     pub ws_n: usize,
+    pub ws: Vec<(f64, f64)>, // (x, w) per workspace button
     pub ws_end: f64,
+    pub btn_w: f64, // the uniform button width
     pub clk_x0: f64,
     pub clk_end: f64,
     pub show_clock: bool,
@@ -60,37 +57,53 @@ pub struct Layout {
     pub show_weather: bool,
     pub ctl: Vec<(f64, f64)>, // (x, w) per config button
     pub th1_x: f64,
+    pub th_w: f64,
     pub show_theme: bool,
 }
 
 pub fn layout(cfg: &Config) -> Layout {
     let ws_n = cfg.bar.workspaces.max(1).min(9);
-    let ws_end = WS_START + ws_n as f64 * WS_W + (ws_n as f64 - 1.0) * WS_GAP;
+    let n_ctl = cfg.button.len();
     let show_clock = cfg.bar.show_clock;
-    let clk_x0 = ws_end + 29.0 + CLK_NUDGE;
-    let clk_end = if show_clock { clk_x0 + CLK_W } else { ws_end };
     let show_weather = cfg.bar.show_weather;
-    let pet_x0 = clk_end + PET_GAP;
-    let pet_end = pet_x0 + PET_W;
-    let wth_x0 = pet_end + WTH_GAP;
-    let wth_end = if show_weather { wth_x0 + WTH_W } else { pet_end };
     let show_theme = cfg.bar.show_theme;
-    let th1_x = LW - 24.0 - TH1_W;
-    let right = if show_theme { th1_x - 16.0 } else { LW - 24.0 };
-    let ctl_start = wth_end + 30.0;
-    let n = cfg.button.len().max(1);
-    let avail = (right - ctl_start).max(60.0);
-    let w = (avail - (n as f64 - 1.0) * CTL_GAP) / n as f64;
-    let w = w.min(CTL_DEFAULT_W).max(40.0);
-    // center the row in the available space so few buttons don't hug left
-    let total = n as f64 * w + (n as f64 - 1.0) * CTL_GAP;
-    let x0 = ctl_start + ((avail - total) / 2.0).max(0.0);
-    let ctl = (0..cfg.button.len())
-        .map(|k| (x0 + k as f64 * (w + CTL_GAP), w))
+    // one width for every button on the strip
+    let n_btns = (ws_n + n_ctl + if show_theme { 1 } else { 0 }).max(1) as f64;
+    let inner_gaps = ((ws_n as f64 - 1.0).max(0.0) + (n_ctl as f64 - 1.0).max(0.0)) * WS_GAP;
+    let fixed = if show_clock { CLK_W } else { 0.0 } + PET_W + if show_weather { WTH_W } else { 0.0 };
+    let n_sec = 2.0 + if show_clock { 1.0 } else { 0.0 } + if show_weather { 1.0 } else { 0.0 }
+        + if show_theme { 1.0 } else { 0.0 };
+    let btn_w = ((LW - 2.0 * EDGE - fixed - n_sec * SEC_GAP - inner_gaps) / n_btns).clamp(48.0, 160.0);
+    let ws = (0..ws_n)
+        .map(|k| (EDGE + k as f64 * (btn_w + WS_GAP), btn_w))
+        .collect::<Vec<_>>();
+    let ws_end = EDGE + ws_n as f64 * btn_w + (ws_n as f64 - 1.0).max(0.0) * WS_GAP;
+    let clk_x0 = ws_end + SEC_GAP;
+    let clk_end = if show_clock { clk_x0 + CLK_W } else { ws_end };
+    let pet_base = if show_clock { clk_end } else { ws_end };
+    let pet_x0 = pet_base + SEC_GAP;
+    let pet_end = pet_x0 + PET_W;
+    let wth_x0 = pet_end + SEC_GAP;
+    let wth_end = if show_weather { wth_x0 + WTH_W } else { pet_end };
+    let ctl_start = wth_end + SEC_GAP;
+    let ctl = (0..n_ctl)
+        .map(|k| (ctl_start + k as f64 * (btn_w + WS_GAP), btn_w))
         .collect();
+    let ctl_end = if n_ctl > 0 {
+        ctl_start + n_ctl as f64 * btn_w + (n_ctl as f64 - 1.0) * WS_GAP
+    } else {
+        ctl_start - SEC_GAP
+    };
+    let th_w = btn_w;
+    let th1_x = LW - EDGE - th_w;
+    // if buttons overflow into the theme slot (extreme configs), theme wins:
+    // widths already clamped to min, strip just runs edge to edge.
+    let _ = ctl_end;
     Layout {
         ws_n,
+        ws,
         ws_end,
+        btn_w,
         clk_x0,
         clk_end,
         show_clock,
@@ -101,6 +114,7 @@ pub fn layout(cfg: &Config) -> Layout {
         show_weather,
         ctl,
         th1_x,
+        th_w,
         show_theme,
     }
 }
@@ -629,7 +643,23 @@ fn theme_button(
         fg = accent;
     }
     let short: String = name.chars().take(13).collect();
+    // fit the label inside any button width; clip so long theme names
+    // can never bleed over neighbors at small uniform sizes
+    let mut size = size;
+    ctx.select_font_face("Sans", FontSlant::Normal, FontWeight::Bold);
+    loop {
+        ctx.set_font_size(size);
+        let ext = ctx.text_extents(&short).expect("extents");
+        if ext.width() <= w - 16.0 || size <= 10.0 {
+            break;
+        }
+        size -= 1.0;
+    }
+    let _ = ctx.save();
+    rounded(ctx, x, y, w, h, 12.0);
+    ctx.clip();
     text_centered(ctx, x + w / 2.0, y + h / 2.0, &short, fg, "Sans", size);
+    let _ = ctx.restore();
 }
 
 /// One launcher button: icon + name grouped and centered.
@@ -845,11 +875,12 @@ pub fn render(
                     let i = k as i32 + 1;
                     let empty: Vec<(&str, &str)> = vec![];
                     let glyphs = ws_apps.get(&i).unwrap_or(&empty);
+                    let (wx, ww) = lay.ws.get(k).copied().unwrap_or((EDGE, lay.btn_w));
                     ws_button(
                         &ctx,
-                        WS_START + k as f64 * (WS_W + WS_GAP),
+                        wx,
                         by,
-                        WS_W,
+                        ww,
                         bh,
                         theme,
                         k + 1,
@@ -928,7 +959,7 @@ pub fn render(
                         &ctx,
                         lay.th1_x,
                         by,
-                        TH1_W,
+                        lay.th_w,
                         bh,
                         &theme.name,
                         cur_accent,

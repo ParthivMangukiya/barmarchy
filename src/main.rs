@@ -863,14 +863,14 @@ fn handle_tap(
         return;
     }
     for k in 0..lay.ws_n {
-        let x0 = 24.0 + k as f64 * (140.0 + 12.0);
-        if lx >= x0 && lx < x0 + 140.0 {
+        let (x0, ww) = lay.ws.get(k).copied().unwrap_or((24.0, lay.btn_w));
+        if lx >= x0 && lx < x0 + ww {
             let rep = hypr::focus_workspace(k as i32 + 1);
             println!("action: workspace {} -> {}", k + 1, if rep.is_empty() { "?" } else { &rep });
             return;
         }
     }
-    if lay.show_theme && lx >= lay.th1_x && lx < lay.th1_x + 140.0 {
+    if lay.show_theme && lx >= lay.th1_x && lx < lay.th1_x + lay.th_w {
         *in_menu = true;
         *menu_at = Instant::now();
         println!("menu: theme picker open");
