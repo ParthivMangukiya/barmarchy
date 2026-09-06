@@ -6,6 +6,7 @@
 //! [bar]
 //! workspaces = 5
 //! show_clock = true
+//! show_weather = true
 //! show_theme = true
 //! menu_timeout_secs = 5.0
 //! slider_timeout_secs = 3.0
@@ -42,6 +43,9 @@ pub struct Bar {
     pub workspaces: usize,
     #[serde(default = "d_true")]
     pub show_clock: bool,
+    /// pixel-style temperature next to the clock (tap = refresh now)
+    #[serde(default = "d_true")]
+    pub show_weather: bool,
     #[serde(default = "d_true")]
     pub show_theme: bool,
     #[serde(default = "d_menu_timeout")]
@@ -68,6 +72,7 @@ impl Default for Bar {
         Self {
             workspaces: 5,
             show_clock: true,
+            show_weather: true,
             show_theme: true,
             menu_timeout_secs: 5.0,
             slider_timeout_secs: 3.0,
@@ -205,14 +210,6 @@ pub fn default_buttons() -> Vec<Button> {
             icon: None,
             command: None,
             label: Some("Mic".into()),
-        },
-        Button {
-            id: "lock".into(),
-            kind: "lock".into(),
-            target: None,
-            icon: Some("󰌾".into()),
-            command: None,
-            label: Some("Lock".into()),
         },
     ]
 }

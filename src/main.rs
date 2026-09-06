@@ -144,7 +144,7 @@ fn main() {
         let th = theme::load_theme();
         let favs = theme::get_favs();
         let focused = hypr::active_workspace();
-        let (px, stride) = render::render(&cfg, &th, &lay, focused, &favs, render::View::Normal);
+        let (px, stride) = render::render(&cfg, &th, &lay, focused, &favs, render::View::Normal, None);
         drm.blit(&px, stride).expect("blit");
         eprintln!("holding {hold}s");
         std::thread::sleep(Duration::from_secs_f64(hold));
@@ -152,6 +152,8 @@ fn main() {
         return;
     }
 
+    // prime the weather cache in the background (renders "--°" until it lands)
+    actions::refresh_weather();
     run_live(&cfg, &lay, &mut drm, live_secs);
 }
 
@@ -215,7 +217,7 @@ fn dump_png(cfg: &config::Config, lay: &render::Layout, path: &str, view: &str) 
         }
         render::render_saver(&sv)
     } else {
-        render::render(cfg, &th, lay, focused, &favs, v)
+        render::render(cfg, &th, lay, focused, &favs, v, None)
     };
     // px is the 64x2008 sideways surface; un-rotate into 2008x60 for viewing.
     let mut src = cairo::ImageSurface::create(cairo::Format::ARgb32, 64, 2008)
@@ -362,6 +364,11 @@ fn run_live(cfg: &config::Config, lay: &render::Layout, drm: &mut drm::DrmBacken
     let mut favs = theme::get_favs();
     let mut last_poll = Instant::now();
     let mut last_minute = minute_now();
+    let mut last_weather = Instant::now();
+    let mut last_weather_mtime = actions::weather_mtime();
+    let mut last_pet = Instant::now();
+    // tap-to-pet override: (mood, happy-until)
+    let mut pet_force: Option<(render::PetMood, Instant)> = None;
 
     let mut in_menu = false;
     let mut menu_at = Instant::now();
@@ -543,6 +550,7 @@ fn run_live(cfg: &config::Config, lay: &render::Layout, drm: &mut drm::DrmBacken
                     &mut slider,
                     &mut last_apply,
                     &mut last_toggle,
+                    &mut pet_force,
                     fn_held,
                     (me_l || me_r) && (ct_l || ct_r),
                     (me_l || me_r) && (sh_l || sh_r),
@@ -595,6 +603,16 @@ fn run_live(cfg: &config::Config, lay: &render::Layout, drm: &mut drm::DrmBacken
                 last_minute = m;
                 dirty = true;
             }
+            // background weather refresh every 10 min; re-render when it lands
+            if now.duration_since(last_weather).as_secs_f64() > 600.0 {
+                last_weather = now;
+                actions::refresh_weather();
+            }
+            let wm = actions::weather_mtime();
+            if wm != last_weather_mtime {
+                last_weather_mtime = wm;
+                dirty = true;
+            }
         }
         if in_menu && now.duration_since(menu_at).as_secs_f64() > cfg.bar.menu_timeout_secs {
             in_menu = false;
@@ -624,6 +642,15 @@ fn run_live(cfg: &config::Config, lay: &render::Layout, drm: &mut drm::DrmBacken
             dirty = false;
         }
 
+        // pixel-pet runs at 1fps while its playground is visible
+        if cfg.bar.show_clock {
+            let now = Instant::now();
+            if now.duration_since(last_pet).as_secs_f64() >= 1.0 {
+                last_pet = now;
+                dirty = true;
+            }
+        }
+
         if dirty {
             dirty = false;
             let th = theme::load_theme();
@@ -647,7 +674,7 @@ fn run_live(cfg: &config::Config, lay: &render::Layout, drm: &mut drm::DrmBacken
             } else {
                 render::View::Normal
             };
-            let (px, stride) = render::render(cfg, &th, lay, focused, &favs, view);
+            let (px, stride) = render::render(cfg, &th, lay, focused, &favs, view, pet_mood_now(&mut pet_force));
             if let Err(e) = drm.blit(&px, stride) {
                 eprintln!("render fail: {e}");
             }
@@ -746,6 +773,7 @@ fn handle_tap(
     slider: &mut Option<Slider>,
     last_apply: &mut (Instant, i32),
     last_toggle: &mut Option<(String, Instant)>,
+    pet_force: &mut Option<(render::PetMood, Instant)>,
     fn_held: bool,
     theme_keys: bool,
     app_keys: bool,
@@ -842,6 +870,20 @@ fn handle_tap(
         println!("menu: theme picker open");
         return;
     }
+    if lay.show_clock && lx >= lay.pet_x0 && lx < lay.pet_end {
+        // tap-to-pet: 5s of Happy (jump + smile + hearts)
+        *pet_force = Some((
+            render::PetMood::Happy,
+            Instant::now() + Duration::from_secs(5),
+        ));
+        println!("pet: petted!");
+        return;
+    }
+    if lay.show_weather && lx >= lay.wth_x0 && lx < lay.wth_end {
+        actions::refresh_weather();
+        println!("weather: refresh requested");
+        return;
+    }
     for (k, btn) in cfg.button.iter().enumerate() {
         if let Some((bx, bw)) = lay.ctl.get(k) {
             if lx >= *bx && lx < *bx + *bw {
@@ -907,6 +949,17 @@ fn handle_tap(
                 }
                 return;
             }
+        }
+    }
+}
+
+/// Resolve the tap-to-pet override: Some(Happy) while the deadline holds.
+fn pet_mood_now(pet_force: &mut Option<(render::PetMood, Instant)>) -> Option<render::PetMood> {
+    match pet_force {
+        Some((m, until)) if Instant::now() < *until => Some(*m),
+        _ => {
+            *pet_force = None;
+            None
         }
     }
 }

@@ -30,8 +30,14 @@ const FN_GAP: f64 = 9.0;
 
 const PX_CELL: f64 = 9.0;
 const PX_GAP: f64 = 9.0;
-const CLK_W: f64 = 4.0 * 3.0 * PX_CELL + PX_CELL + 4.0 * PX_GAP; // 153
+const CLK_W: f64 = 5.0 * 3.0 * PX_CELL + 4.0 * PX_GAP; // 171, full "HH:MM"
 const CLK_NUDGE: f64 = -5.0;
+// pet playground after the clock; weather sits past it, next to brightness
+const PET_GAP: f64 = 16.0;
+const PET_W: f64 = 240.0;
+// weather block fits 5 glyphs ("-12°C") so controls never shift
+const WTH_W: f64 = 5.0 * 3.0 * PX_CELL + 4.0 * PX_GAP; // 171
+const WTH_GAP: f64 = 16.0;
 
 pub const SL_TX0: f64 = 300.0;
 pub const SL_TX1: f64 = LW - 140.0;
@@ -47,6 +53,11 @@ pub struct Layout {
     pub clk_x0: f64,
     pub clk_end: f64,
     pub show_clock: bool,
+    pub pet_x0: f64,
+    pub pet_end: f64,
+    pub wth_x0: f64,
+    pub wth_end: f64,
+    pub show_weather: bool,
     pub ctl: Vec<(f64, f64)>, // (x, w) per config button
     pub th1_x: f64,
     pub show_theme: bool,
@@ -58,10 +69,15 @@ pub fn layout(cfg: &Config) -> Layout {
     let show_clock = cfg.bar.show_clock;
     let clk_x0 = ws_end + 29.0 + CLK_NUDGE;
     let clk_end = if show_clock { clk_x0 + CLK_W } else { ws_end };
+    let show_weather = cfg.bar.show_weather;
+    let pet_x0 = clk_end + PET_GAP;
+    let pet_end = pet_x0 + PET_W;
+    let wth_x0 = pet_end + WTH_GAP;
+    let wth_end = if show_weather { wth_x0 + WTH_W } else { pet_end };
     let show_theme = cfg.bar.show_theme;
     let th1_x = LW - 24.0 - TH1_W;
     let right = if show_theme { th1_x - 16.0 } else { LW - 24.0 };
-    let ctl_start = clk_end + 30.0;
+    let ctl_start = wth_end + 30.0;
     let n = cfg.button.len().max(1);
     let avail = (right - ctl_start).max(60.0);
     let w = (avail - (n as f64 - 1.0) * CTL_GAP) / n as f64;
@@ -78,6 +94,11 @@ pub fn layout(cfg: &Config) -> Layout {
         clk_x0,
         clk_end,
         show_clock,
+        pet_x0,
+        pet_end,
+        wth_x0,
+        wth_end,
+        show_weather,
         ctl,
         th1_x,
         show_theme,
@@ -127,6 +148,242 @@ fn text_centered(
     ext.width()
 }
 
+/// Pixel pet moods on a 54s loop: idle, dance, play, eat, sleep.
+/// Happy is never scheduled — it only triggers when you tap (pet) the cat.
+#[derive(Clone, Copy, PartialEq)]
+pub enum PetMood {
+    Idle,
+    Dance,
+    Play,
+    Eat,
+    Sleep,
+    Happy,
+}
+
+/// (mood, seconds into the current slot), derived from wall time so no
+/// daemon state is needed. PET_DEBUG="mood:secs" pins a mood for previews.
+fn pet_mood() -> (PetMood, f64) {
+    if let Ok(dbg) = std::env::var("PET_DEBUG") {
+        let mut it = dbg.split(':');
+        let mood = match it.next().unwrap_or("") {
+            "dance" => PetMood::Dance,
+            "play" => PetMood::Play,
+            "eat" => PetMood::Eat,
+            "sleep" => PetMood::Sleep,
+            "happy" => PetMood::Happy,
+            _ => PetMood::Idle,
+        };
+        let s: f64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        return (mood, s);
+    }
+    let t = unsafe { libc::time(std::ptr::null_mut()) } as f64 % 54.0;
+    if t < 8.0 {
+        (PetMood::Idle, t)
+    } else if t < 14.0 {
+        (PetMood::Dance, t - 8.0)
+    } else if t < 20.0 {
+        (PetMood::Idle, t - 14.0)
+    } else if t < 26.0 {
+        (PetMood::Play, t - 20.0)
+    } else if t < 32.0 {
+        (PetMood::Eat, t - 26.0)
+    } else if t < 38.0 {
+        (PetMood::Idle, t - 32.0)
+    } else if t < 48.0 {
+        (PetMood::Sleep, t - 38.0)
+    } else {
+        (PetMood::Idle, t - 48.0)
+    }
+}
+
+const PET_OPEN: [u8; 25] = [
+    1, 0, 0, 0, 1, //
+    1, 1, 1, 1, 1, //
+    1, 0, 1, 0, 1, //
+    1, 1, 1, 1, 1, //
+    0, 1, 1, 1, 0, //
+];
+const PET_SHUT: [u8; 25] = [
+    1, 0, 0, 0, 1, //
+    1, 1, 1, 1, 1, //
+    1, 1, 1, 1, 1, //
+    1, 1, 1, 1, 1, //
+    0, 1, 1, 1, 0, //
+];
+const PET_EAT_SHUT: [u8; 25] = [
+    1, 0, 0, 0, 1, //
+    1, 1, 1, 1, 1, //
+    1, 0, 1, 0, 1, //
+    0, 1, 1, 1, 0, //
+    0, 0, 0, 0, 0, //
+];
+const PET_EAT_OPEN: [u8; 25] = [
+    1, 0, 0, 0, 1, //
+    1, 1, 1, 1, 1, //
+    1, 0, 1, 0, 1, //
+    0, 1, 0, 1, 0, //
+    0, 0, 0, 0, 0, //
+];
+const PET_WINK_L: [u8; 25] = [
+    1, 0, 0, 0, 1, //
+    1, 1, 1, 1, 1, //
+    1, 0, 1, 1, 1, //
+    1, 1, 1, 1, 1, //
+    0, 1, 1, 1, 0, //
+];
+const PET_WINK_R: [u8; 25] = [
+    1, 0, 0, 0, 1, //
+    1, 1, 1, 1, 1, //
+    1, 1, 1, 0, 1, //
+    1, 1, 1, 1, 1, //
+    0, 1, 1, 1, 0, //
+];
+const PET_SMILE: [u8; 25] = [
+    1, 0, 0, 0, 1, //
+    1, 1, 1, 1, 1, //
+    1, 1, 1, 1, 1, //
+    0, 1, 0, 1, 0, //
+    0, 1, 1, 1, 0, //
+];
+const PET_HEART: [u8; 9] = [
+    1, 0, 1, //
+    1, 1, 1, //
+    0, 1, 0, //
+];
+const PET_Z: [u8; 9] = [
+    1, 1, 1, //
+    0, 1, 0, //
+    1, 1, 1, //
+];
+
+fn pet_cells(ctx: &Context, x0: f64, y0: f64, cell: f64, cells: &[u8], cols: usize, c: Rgb, a: f64) {
+    ctx.set_source_rgba(c.0, c.1, c.2, a.clamp(0.0, 1.0));
+    for (i, v) in cells.iter().enumerate() {
+        if *v == 1 {
+            ctx.rectangle(
+                x0 + (i % cols) as f64 * cell,
+                y0 + (i / cols) as f64 * cell,
+                cell - 1.0,
+                cell - 1.0,
+            );
+        }
+    }
+    ctx.fill().ok();
+}
+
+/// The pixel pet. `cx` = playground center, `half` = roaming room.
+/// `force` (tap-to-pet) overrides the schedule with Happy.
+fn pixel_pet(ctx: &Context, theme: &Theme, cx: f64, half: f64, force: Option<PetMood>) {
+    let wall = unsafe { libc::time(std::ptr::null_mut()) } as f64;
+    let (mood, s) = match force {
+        Some(PetMood::Happy) => (PetMood::Happy, wall),
+        _ => pet_mood(),
+    };
+    let sec = s as usize;
+    let x0 = cx - 2.5 * PX_CELL;
+    let y0 = (LH - 5.0 * PX_CELL) / 2.0;
+    match mood {
+        PetMood::Idle => {
+            // blink + alternating winks across the 8s slot
+            let grid = match s % 8.0 {
+                v if v < 3.0 => &PET_OPEN,
+                v if v < 4.0 => &PET_SHUT,
+                v if v < 5.0 => &PET_OPEN,
+                v if v < 6.0 => &PET_WINK_L,
+                v if v < 7.0 => &PET_WINK_R,
+                _ => &PET_OPEN,
+            };
+            pet_cells(ctx, x0, y0, PX_CELL, grid, 5, theme.accent, 1.0);
+        }
+        PetMood::Dance => {
+            // big side-step hops across the playground
+            let hop = sec % 2 == 1;
+            let dx = if hop { 10.0 } else { -10.0 };
+            let dy = if hop { -6.0 } else { 0.0 };
+            pet_cells(ctx, x0 + dx, y0 + dy, PX_CELL, &PET_SHUT, 5, theme.accent, 1.0);
+        }
+        PetMood::Play => {
+            // chases a bouncing ball sweeping the playground
+            let bx = cx + (s / 6.0 * 6.2832).sin() * (half - 20.0);
+            let gy = y0 + 5.0 * PX_CELL - 7.0;
+            let by = gy - (s / 6.0 * 12.5664).sin().abs() * 16.0;
+            ctx.set_source_rgba(theme.fg.0, theme.fg.1, theme.fg.2, 1.0);
+            ctx.rectangle(bx - 3.5, by - 3.5, 7.0, 7.0);
+            ctx.fill().ok();
+            let dx = ((bx - cx) * 0.5).clamp(-(half - 50.0), half - 50.0);
+            let hop = (bx - cx).abs() > 12.0 && sec % 2 == 1;
+            pet_cells(
+                ctx,
+                x0 + dx,
+                y0 + if hop { -4.0 } else { 0.0 },
+                PX_CELL,
+                &PET_OPEN,
+                5,
+                theme.accent,
+                1.0,
+            );
+        }
+        PetMood::Eat => {
+            // munches from a bowl (dim row under the chin), bobbing slightly
+            let grid = if sec % 2 == 0 { &PET_EAT_SHUT } else { &PET_EAT_OPEN };
+            let bob = if sec % 2 == 0 { 0.0 } else { 1.5 };
+            pet_cells(ctx, x0, y0 + bob, PX_CELL, grid, 5, theme.accent, 1.0);
+            ctx.set_source_rgba(theme.dim.0, theme.dim.1, theme.dim.2, 1.0);
+            ctx.rectangle(x0, y0 + bob + 4.0 * PX_CELL, 5.0 * PX_CELL - 1.0, PX_CELL - 1.0);
+            ctx.fill().ok();
+        }
+        PetMood::Sleep => {
+            // breathing (slow bob) + two Z's drifting through the margin
+            let bob = (sec % 2) as f64 * 1.0;
+            pet_cells(ctx, x0, y0 + 8.0 + bob, PX_CELL, &PET_SHUT, 5, theme.accent, 0.85);
+            let p = s / 10.0;
+            for i in 0..2 {
+                let lp = p * 2.0 - i as f64;
+                if (0.0..1.0).contains(&lp) {
+                    pet_cells(
+                        ctx,
+                        x0 + 46.0 + 8.0 * lp,
+                        y0 + 20.0 - 6.0 * lp,
+                        4.0,
+                        &PET_Z,
+                        3,
+                        theme.accent,
+                        (1.0 - lp) * 0.85,
+                    );
+                }
+            }
+        }
+        PetMood::Happy => {
+            // petted! jumping smile with blush + a burst of hearts
+            let jump = (sec % 2 == 1) as usize as f64 * -6.0;
+            pet_cells(ctx, x0, y0 + jump, PX_CELL, &PET_SMILE, 5, theme.accent, 1.0);
+            // blush cheeks
+            ctx.set_source_rgba(theme.red.0, theme.red.1, theme.red.2, 0.9);
+            ctx.rectangle(x0, y0 + jump + 2.0 * PX_CELL, PX_CELL - 1.0, PX_CELL - 1.0);
+            ctx.rectangle(
+                x0 + 4.0 * PX_CELL,
+                y0 + jump + 2.0 * PX_CELL,
+                PX_CELL - 1.0,
+                PX_CELL - 1.0,
+            );
+            ctx.fill().ok();
+            for i in 0..3 {
+                let ph = ((wall + i as f64 * 1.7) % 5.0) / 5.0;
+                pet_cells(
+                    ctx,
+                    x0 + 4.0 + i as f64 * 14.0 + (wall * 2.0 + i as f64).sin() * 3.0,
+                    y0 - 4.0 - ph * 22.0,
+                    4.0,
+                    &PET_HEART,
+                    3,
+                    theme.red,
+                    (1.0 - ph) * 0.95,
+                );
+            }
+        }
+    }
+}
+
 fn now_hhmm() -> String {
     unsafe {
         let t = libc::time(std::ptr::null_mut());
@@ -136,7 +393,7 @@ fn now_hhmm() -> String {
     }
 }
 
-// 3x5 pixel digits
+// 3x5 pixel glyphs (clock + weather)
 fn digit(ch: char) -> Option<[u8; 15]> {
     let d: [u8; 15] = match ch {
         '0' => [1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1],
@@ -150,17 +407,20 @@ fn digit(ch: char) -> Option<[u8; 15]> {
         '8' => [1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1],
         '9' => [1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1],
         ':' => [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+        '-' => [0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+        '°' => [1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        'C' => [1, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1],
+        'F' => [1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0],
         _ => return None,
     };
     Some(d)
 }
 
-fn ascii_clock(ctx: &Context, theme: &Theme, lay: &Layout, timestring: &str) {
+fn pixel_text(ctx: &Context, theme: &Theme, mut x: f64, s: &str) {
     let top = (LH - 5.0 * PX_CELL) / 2.0;
-    let mut x = lay.clk_x0;
-    for ch in timestring.chars() {
+    for ch in s.chars() {
         let Some(g) = digit(ch) else { continue };
-        let color = if ch == ':' { theme.accent } else { theme.fg };
+        let color = if ch == ':' || ch == '°' { theme.accent } else { theme.fg };
         set_rgb(ctx, color);
         for r in 0..5 {
             for c in 0..3 {
@@ -519,6 +779,7 @@ pub fn render(
     focused: i32,
     favs: &[(String, Rgb)],
     view: View,
+    pet_force: Option<PetMood>,
 ) -> (Vec<u8>, usize) {
     let mut surf =
         ImageSurface::create(Format::ARgb32, W, H).expect("cairo surface");
@@ -599,7 +860,21 @@ pub fn render(
                 }
 
                 if lay.show_clock {
-                    ascii_clock(&ctx, theme, lay, &now_hhmm());
+                    pixel_text(&ctx, theme, lay.clk_x0, &now_hhmm());
+                    pixel_pet(
+                        &ctx,
+                        theme,
+                        (lay.pet_x0 + lay.pet_end) / 2.0,
+                        PET_W / 2.0,
+                        pet_force,
+                    );
+                }
+
+                if lay.show_weather {
+                    // pixel temperature ("21°C"); "--°" until first fetch lands
+                    let w = actions::weather_read();
+                    let s = if w.is_empty() { "--°".to_string() } else { w };
+                    pixel_text(&ctx, theme, lay.wth_x0, &s);
                 }
 
                 // state-aware icons for toggle buttons
@@ -611,7 +886,7 @@ pub fn render(
                     let (icon, glyph): (String, Rgb) = match btn.kind.as_str() {
                         "slider" => (
                             btn.icon.clone().unwrap_or_else(|| "?".into()),
-                            theme.dim,
+                            theme.accent,
                         ),
                         "media" => (
                             if playing {
@@ -619,11 +894,11 @@ pub fn render(
                             } else {
                                 "\u{F04C}".into()
                             },
-                            theme.fg,
+                            theme.accent,
                         ),
                         "mic" => (
                             if muted { "\u{F131}".into() } else { "\u{F130}".into() },
-                            if muted { theme.red } else { theme.dim },
+                            if muted { theme.red } else { theme.accent },
                         ),
                         "night" => (
                             btn.icon.clone().unwrap_or_else(|| "\u{F186}".into()),
@@ -631,11 +906,11 @@ pub fn render(
                         ),
                         "lock" => (
                             btn.icon.clone().unwrap_or_else(|| "󰌾".into()),
-                            theme.dim,
+                            theme.accent,
                         ),
                         _ => (
                             btn.icon.clone().unwrap_or_else(|| "?".into()),
-                            theme.dim,
+                            theme.accent,
                         ),
                     };
                     ctl_button(&ctx, *x, by, *w, bh, &icon, theme.fg, glyph);

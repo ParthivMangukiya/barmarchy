@@ -225,3 +225,48 @@ pub fn lock_session(override_cmd: Option<&str>) {
     }
     eprintln!("lock: no lock command found (install hyprlock?)");
 }
+
+// --- weather ---
+
+fn weather_cache_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+    std::path::PathBuf::from(home).join(".cache/omarchy-touchbar/weather")
+}
+
+/// Cached temperature like "21°C" (max 5 chars), "" when never fetched.
+pub fn weather_read() -> String {
+    let raw = std::fs::read_to_string(weather_cache_path()).unwrap_or_default();
+    raw.chars()
+        .filter(|c| c.is_ascii_digit() || *c == '-' || *c == '°' || *c == 'C' || *c == 'F')
+        .take(5)
+        .collect()
+}
+
+/// Cache mtime (unix secs, 0 when missing) — the live loop watches this
+/// to re-render when a background refresh lands.
+pub fn weather_mtime() -> u64 {
+    std::fs::metadata(weather_cache_path())
+        .and_then(|m| m.modified())
+        .map(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
+}
+
+/// Fire-and-forget wttr.in refresh into the cache (never blocks the bar).
+/// Uses Omarchy's stored location, else wttr.in auto-detects by IP.
+pub fn refresh_weather() {
+    let cache = weather_cache_path();
+    let dir = cache.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    let file = cache.to_string_lossy().to_string();
+    spawn_shell(&format!(
+        "loc=$(omarchy-weather-location 2>/dev/null); \
+         if [ -n \"$loc\" ]; then q=$(jq -rn --arg p \"$loc\" '$p|@uri'); else q=\"\"; fi; \
+         t=$(curl -fsS --max-time 4 \"https://wttr.in/${{q}}?format=%t\" 2>/dev/null | tr -d '+ \\n'); \
+         case \"$t\" in *°C|*°F) mkdir -p \"{dir}\" && printf '%s' \"$t\" > \"{file}.tmp\" \
+           && mv \"{file}.tmp\" \"{file}\" && echo \"weather: $t\" >&2;; \
+         *) echo \"weather: fetch failed\" >&2;; esac"
+    ));
+}
