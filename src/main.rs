@@ -15,6 +15,7 @@ mod actions;
 mod config;
 mod drm;
 mod hypr;
+mod probe;
 mod render;
 mod saver;
 mod theme;
@@ -25,11 +26,6 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
 
 use touch::TouchState;
-
-const TOUCH_DEV: &str = "/dev/input/event3";
-const KBD_DEV: &str = "/dev/input/event1";
-const X_MAX: f64 = 23044.0;
-const Y_MAX: f64 = 639.0;
 
 struct Slider {
     button_idx: usize,
@@ -66,6 +62,16 @@ fn open_dev(path: &str) -> Option<RawFd> {
     } else {
         Some(fd)
     }
+}
+
+/// Probed touch device + its live ABS ranges (vary across models).
+fn open_touch() -> Option<(RawFd, f64, f64)> {
+    let (node, x_max, y_max) = probe::touch_device()?;
+    open_dev(&node).map(|fd| (fd, x_max, y_max))
+}
+
+fn open_kbd() -> Option<RawFd> {
+    probe::kbd_device().and_then(|node| open_dev(&node))
 }
 
 fn main() {
@@ -131,13 +137,13 @@ fn main() {
     }
 
     if let Some(secs) = saver_secs {
-        let mut drm = drm::DrmBackend::open().expect("open /dev/dri/card2");
+        let mut drm = drm::DrmBackend::open().expect("find Touch Bar DRM panel");
         drm.modeset().expect("drm modeset");
         run_saver_preview(&mut drm, secs);
         return;
     }
 
-    let mut drm = drm::DrmBackend::open().expect("open /dev/dri/card2");
+    let mut drm = drm::DrmBackend::open().expect("find Touch Bar DRM panel");
     drm.modeset().expect("drm modeset");
 
     if let Some(hold) = ui_hold {
@@ -263,7 +269,7 @@ fn run_saver_preview(drm: &mut drm::DrmBackend, secs: f64) {
 }
 
 fn run_probe(secs: f64) {
-    let Some(tfd) = open_dev(TOUCH_DEV) else { return };
+    let Some((tfd, x_max, y_max)) = open_touch() else { return };
     let mut touch = TouchState::new(true);
     eprintln!("probe: tap the bar, coordinates print below");
     let end = Instant::now() + Duration::from_secs_f64(secs);
@@ -279,8 +285,8 @@ fn run_probe(secs: f64) {
             for (x, y) in touch.taps.drain(..) {
                 println!(
                     "tap raw x={x} y={y} -> lx={:.0} ly={:.0}",
-                    x as f64 * render::LW / X_MAX,
-                    y as f64 * render::LH / Y_MAX
+                    x as f64 * render::LW / x_max,
+                    y as f64 * render::LH / y_max
                 );
             }
         }
@@ -349,8 +355,8 @@ fn drain_keys(fd: RawFd) -> Vec<(u16, u16, i32)> {
 fn run_live(cfg: &config::Config, lay: &render::Layout, drm: &mut drm::DrmBackend, live_secs: Option<f64>) {
     use touch::{EV_KEY, KEY_CAPSLOCK, KEY_FN, KEY_LCTRL, KEY_LMETA, KEY_LSHIFT, KEY_RCTRL, KEY_RMETA, KEY_RSHIFT};
 
-    let Some(tfd) = open_dev(TOUCH_DEV) else { return };
-    let kfd = open_dev(KBD_DEV);
+    let Some((tfd, x_max, y_max)) = open_touch() else { return };
+    let kfd = open_kbd();
     let mut touch = TouchState::new(true);
 
     let mut focused = hypr::active_workspace();
@@ -538,8 +544,8 @@ fn run_live(cfg: &config::Config, lay: &render::Layout, drm: &mut drm::DrmBacken
                 }
             } else {
             for (x, y) in touch.taps.drain(..) {
-                let lx = x as f64 * render::LW / X_MAX;
-                let ly = y as f64 * render::LH / Y_MAX;
+                let lx = x as f64 * render::LW / x_max;
+                let ly = y as f64 * render::LH / y_max;
                 handle_tap(
                     cfg,
                     lay,
@@ -562,8 +568,8 @@ fn run_live(cfg: &config::Config, lay: &render::Layout, drm: &mut drm::DrmBacken
             if let Some(sl) = slider.as_mut() {
                 if !fn_held {
                     if let Some((rx, ry)) = touch.active_pos() {
-                        let lx = rx as f64 * render::LW / X_MAX;
-                        let ly = ry as f64 * render::LH / Y_MAX;
+                        let lx = rx as f64 * render::LW / x_max;
+                        let ly = ry as f64 * render::LH / y_max;
                         if lx >= 130.0 && (4.0..=56.0).contains(&ly) {
                             let v = ((lx - render::SL_TX0) / (render::SL_TX1 - render::SL_TX0)
                                 * 100.0) as i32;

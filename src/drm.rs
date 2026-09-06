@@ -1,12 +1,11 @@
 //! DRM dumb-buffer backend (1:1 port of the Python ioctl path).
 //!
-//! Opens /dev/dri/card2, picks the connected connector, creates a
-//! 64x2008 XRGB8888 dumb buffer, modesets, and mmaps it for blits.
+//! Scans /dev/dri/card* for a connected 2008x60 Touch Bar panel, creates an
+//! XRGB8888 dumb buffer, modesets, and mmaps it for blits.
 
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 
-pub const CARD: &str = "/dev/dri/card2";
 pub const W: i32 = 64;
 pub const H: i32 = 2008;
 pub const DRM_FORMAT_XRGB8888: u32 = 0x3432_5258;
@@ -175,29 +174,72 @@ struct Dirty {
 
 pub struct DrmBackend {
     file: File,
+    path: String,
+    conn_id: u32,
+    crtc_id: u32,
+    mode: ModeInfo,
     map: Option<memmap2::MmapMut>,
     fb_id: u32,
     pitch: u32,
     size: usize,
 }
 
+/// Apple Touch Bar panels are 2008x60 (either orientation in the mode list).
+fn is_strip_mode(m: &ModeInfo) -> bool {
+    let (a, b) = (m.hdisplay as u32, m.vdisplay as u32);
+    a.min(b) == 60 && a.max(b) == 2008
+}
+
 impl DrmBackend {
+    /// Scan DRM cards for a connected Touch Bar panel instead of assuming
+    /// a fixed /dev node (numbering varies across Asahi models/kernels).
     pub fn open() -> std::io::Result<Self> {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(CARD)?;
-        Ok(Self {
-            file,
-            map: None,
-            fb_id: 0,
-            pitch: 0,
-            size: 0,
-        })
+        let mut candidates = vec![];
+        if let Ok(p) = std::env::var("BARMARCHY_DRM") {
+            if !p.is_empty() {
+                candidates.push(p);
+            }
+        }
+        for i in 0..16 {
+            let p = format!("/dev/dri/card{i}");
+            if std::fs::metadata(&p).is_ok() && !candidates.contains(&p) {
+                candidates.push(p);
+            }
+        }
+        let mut seen = vec![];
+        for path in candidates {
+            match Self::probe_card(&path) {
+                Ok((conn_id, crtc_id, mode)) => {
+                    let file = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
+                    eprintln!(
+                        "probe: display = {path} conn={conn_id} mode={}x{}",
+                        mode.hdisplay, mode.vdisplay
+                    );
+                    return Ok(Self {
+                        file,
+                        path,
+                        conn_id,
+                        crtc_id,
+                        mode,
+                        map: None,
+                        fb_id: 0,
+                        pitch: 0,
+                        size: 0,
+                    });
+                }
+                Err(e) => seen.push(format!("{path} ({e})")),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no 2008x60 Touch Bar panel found; tried: {}", seen.join(", ")),
+        ))
     }
 
-    pub fn modeset(&mut self) -> std::io::Result<()> {
-        let fd = self.file.as_raw_fd();
+    /// Open one card, return (connector, crtc, strip mode) or why not.
+    fn probe_card(path: &str) -> std::io::Result<(u32, u32, ModeInfo)> {
+        let file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        let fd = file.as_raw_fd();
         // pass 1: counts
         let mut res = Res::default();
         ioctl(fd, ioctl_getresources(), &mut res as *mut _ as *mut _)?;
@@ -215,7 +257,6 @@ impl DrmBackend {
         ioctl(fd, ioctl_getresources(), &mut res as *mut _ as *mut _)?;
         let crtc_id = crtcs[0];
 
-        let mut chosen: Option<(u32, ModeInfo)> = None;
         for cid in conns.iter().take(n_conn) {
             let mut c = Conn::default();
             c.connector_id = *cid;
@@ -229,12 +270,19 @@ impl DrmBackend {
             c.count_props = 0;
             c.count_encoders = 0;
             ioctl(fd, ioctl_getconnector(), &mut c as *mut _ as *mut _)?;
-            chosen = Some((*cid, modes[0]));
-            break;
+            if let Some(m) = modes.iter().find(|m| is_strip_mode(m)) {
+                return Ok((*cid, crtc_id, *m));
+            }
         }
-        let (conn_id, mode) = chosen.ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "no connected connector")
-        })?;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no connected 2008x60 panel",
+        ))
+    }
+
+    pub fn modeset(&mut self) -> std::io::Result<()> {
+        let fd = self.file.as_raw_fd();
+        let (conn_id, mode) = (self.conn_id, self.mode);
 
         let mut dumb = CreateDumb {
             height: H as u32,
@@ -258,7 +306,7 @@ impl DrmBackend {
         let mut crtc = SetCrtc {
             conns_ptr: conn_list.as_ptr() as u64,
             count: 1,
-            crtc_id,
+            crtc_id: self.crtc_id,
             fb_id: fb.fb_id,
             mode_valid: 1,
             mode,
