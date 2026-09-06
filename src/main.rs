@@ -226,7 +226,7 @@ fn dump_png(cfg: &config::Config, lay: &render::Layout, path: &str, view: &str) 
         let mut d = src.data().expect("src data");
         d.copy_from_slice(&px);
     }
-    let mut out = cairo::ImageSurface::create(cairo::Format::ARgb32, 2008, 60)
+    let out = cairo::ImageSurface::create(cairo::Format::ARgb32, 2008, 60)
         .expect("out surface");
     {
         let ctx = cairo::Context::new(&out).expect("ctx");
