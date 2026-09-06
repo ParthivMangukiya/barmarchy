@@ -10,9 +10,12 @@ all rendered straight to the bar in Rust. Replaces `tiny-dfr`.
 curl -fsSL https://raw.githubusercontent.com/ParthivMangukiya/barmarchy/main/install.sh | bash
 ```
 
-Requirements: Apple Silicon MacBook Pro with Touch Bar (M1/M2 13",
-Asahi/Omarchy), user in `video` + `input` groups (the installer adds you;
-log out/in once if it did). The installer builds the release binary,
+Requirements: Apple Silicon MacBook Pro with Touch Bar running
+Asahi/Omarchy (M1 13" J293 verified; M2 13" J493 uses the same panel and is
+expected to work — please report). No hardcoded `/dev` nodes: the daemon
+probes at startup for the 2008x60 DRM panel, the `* Touch Bar` input, its
+live touch ranges, and the `Apple SPI Keyboard`. User must be in `video` +
+`input` groups (the installer adds you; log out/in once if it did). The installer builds the release binary,
 installs `~/.local/bin/omarchy-touchbar`, enables the user service, and
 masks stock `tiny-dfr`. Uninstall: `./install.sh --uninstall`.
 
@@ -52,6 +55,11 @@ url = "https://youtube.com/"
 ```
 
 Restart after edits: `systemctl --user restart omarchy-touchbar.service`.
+
+Hardware overrides (only needed if probing picks wrong on your model):
+`BARMARCHY_DRM=/dev/dri/card1`, `BARMARCHY_TOUCH=/dev/input/event5`,
+`BARMARCHY_KBD=/dev/input/event2` — set via
+`systemctl --user edit omarchy-touchbar.service` (`[Service] Environment=`).
 
 ## Hack on it
 
