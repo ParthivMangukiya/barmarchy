@@ -1,0 +1,13 @@
+# Rust build output
+/target/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Editor / OS junk
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store

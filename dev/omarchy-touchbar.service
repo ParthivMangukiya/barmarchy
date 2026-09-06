@@ -1,0 +1,12 @@
+[Unit]
+Description=Omarchy Touch Bar daemon (native, replaces tiny-dfr)
+After=default.target
+
+[Service]
+ExecStart=%h/Work/omarchy-touchbar/target/release/omarchy-touchbar
+Restart=always
+RestartSec=1
+# needs DRM + input devices (user must be in video,input groups)
+
+[Install]
+WantedBy=default.target
