@@ -4,9 +4,10 @@ Native Touch Bar daemon for Omarchy on Apple Silicon Macs — workspaces, app
 icons, sliders, F-keys, themes, a pixel pet, and a particle screensaver,
 all rendered straight to the bar in Rust. Replaces `tiny-dfr`.
 
-![barmarchy on the Touch Bar: theme picker + live audio visualizer](demo/barmarchy-visualizer.mp4)
+![barmarchy on the Touch Bar: theme picker + live audio visualizer](demo/barmarchy-demo.gif)
 
-*The bar in action: theme picker + live audio visualizer (tap to cycle styles).*
+*The bar in action: theme picker + live audio visualizer (tap to cycle styles).
+Full-quality clip: [barmarchy-visualizer.mp4](demo/barmarchy-visualizer.mp4).*
 
 
 ## Install (one command)
