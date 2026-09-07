@@ -17,6 +17,10 @@ const NEEDLE: &[u8] = b"org.omarchy.screensaver";
 
 /// True while the Omarchy desktop screensaver is running.
 /// Native /proc scan (no fork) so the live loop can call it every second.
+/// Matches only whole argv entries, so transient processes that merely
+/// mention the class (shell one-liners, jq filters, pgrep/grep wrappers)
+/// can't trip the detector: the real terminal carries it as its own
+/// --class= / --app-id= argument.
 pub fn saver_active() -> bool {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return false;
@@ -29,8 +33,13 @@ pub fn saver_active() -> bool {
         let Ok(cmd) = std::fs::read(format!("/proc/{name}/cmdline")) else {
             continue;
         };
-        if cmd.windows(NEEDLE.len()).any(|w| w == NEEDLE) {
-            return true;
+        for arg in cmd.split(|b| *b == 0) {
+            if arg == b"--class=org.omarchy.screensaver"
+                || arg == b"--app-id=org.omarchy.screensaver"
+                || arg == NEEDLE
+            {
+                return true;
+            }
         }
     }
     false

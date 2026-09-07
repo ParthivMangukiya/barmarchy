@@ -15,6 +15,8 @@ mod actions;
 mod config;
 mod drm;
 mod hypr;
+mod icons;
+mod deck;
 mod probe;
 mod render;
 mod saver;
@@ -124,7 +126,8 @@ fn main() {
     }
 
     let cfg = config::load();
-    let lay = render::layout(&cfg);
+    let mut lay = render::layout(&cfg);
+    let mut icon_cache = icons::IconCache::new();
 
     if let Some(png) = png_path {
         dump_png(&cfg, &lay, &png, &png_view);
@@ -150,7 +153,7 @@ fn main() {
         let th = theme::load_theme();
         let favs = theme::get_favs();
         let focused = hypr::active_workspace();
-        let (px, stride) = render::render(&cfg, &th, &lay, focused, &favs, render::View::Normal, None);
+        let (px, stride) = render::render(&cfg, &th, &lay, focused, &favs, render::View::Normal, &deck::ZoneState::default(), &mut icon_cache, None);
         drm.blit(&px, stride).expect("blit");
         eprintln!("holding {hold}s");
         std::thread::sleep(Duration::from_secs_f64(hold));
@@ -160,7 +163,7 @@ fn main() {
 
     // prime the weather cache in the background (renders "--°" until it lands)
     actions::refresh_weather();
-    run_live(&cfg, &lay, &mut drm, live_secs);
+    run_live(&cfg, &mut lay, &mut drm, live_secs);
 }
 
 /// Render the current state to a 2008x60 PNG for offline inspection.
@@ -196,6 +199,10 @@ fn dump_png(cfg: &config::Config, lay: &render::Layout, path: &str, view: &str) 
     } else {
         render::View::Normal
     };
+    // --view <deck-plugin-id> forces the center slot for preview
+    // (live selection would need real MPRIS playback / timer feed files).
+    // The id resolves opaquely: the bar never names a plugin concretely.
+    let forced_center = deck::center_by_id(view);
     // saver views simulate the animation:
     //   --view saver                 assemble @2.2s
     //   --view saver:1.0             assemble @1.0s
@@ -223,7 +230,8 @@ fn dump_png(cfg: &config::Config, lay: &render::Layout, path: &str, view: &str) 
         }
         render::render_saver(&sv)
     } else {
-        render::render(cfg, &th, lay, focused, &favs, v, None)
+        let mut icon_cache = icons::IconCache::new();
+        render::render(cfg, &th, lay, focused, &favs, v, &deck::ZoneState::default(), &mut icon_cache, forced_center)
     };
     // px is the 64x2008 sideways surface; un-rotate into 2008x60 for viewing.
     let mut src = cairo::ImageSurface::create(cairo::Format::ARgb32, 64, 2008)
@@ -352,7 +360,7 @@ fn drain_keys(fd: RawFd) -> Vec<(u16, u16, i32)> {
     out
 }
 
-fn run_live(cfg: &config::Config, lay: &render::Layout, drm: &mut drm::DrmBackend, live_secs: Option<f64>) {
+fn run_live(cfg: &config::Config, lay: &mut render::Layout, drm: &mut drm::DrmBackend, live_secs: Option<f64>) {
     use touch::{EV_KEY, KEY_CAPSLOCK, KEY_FN, KEY_LCTRL, KEY_LMETA, KEY_LSHIFT, KEY_RCTRL, KEY_RMETA, KEY_RSHIFT};
 
     let Some((tfd, x_max, y_max)) = open_touch() else { return };
@@ -373,8 +381,6 @@ fn run_live(cfg: &config::Config, lay: &render::Layout, drm: &mut drm::DrmBacken
     let mut last_weather = Instant::now();
     let mut last_weather_mtime = actions::weather_mtime();
     let mut last_pet = Instant::now();
-    // tap-to-pet override: (mood, happy-until)
-    let mut pet_force: Option<(render::PetMood, Instant)> = None;
 
     let mut in_menu = false;
     let mut menu_at = Instant::now();
@@ -391,6 +397,14 @@ fn run_live(cfg: &config::Config, lay: &render::Layout, drm: &mut drm::DrmBacken
     let mut saver_tap_logged = false;
     let mut last_saver_check = Instant::now() - Duration::from_secs(10);
     let mut last_frame = Instant::now();
+    // debounce: single-scan blips (launch/teardown wrappers) must not flip us
+    let mut saver_hits: u8 = 0;
+    let mut saver_miss: u8 = 0;
+    let mut icon_cache = icons::IconCache::new();
+    // Center deck state: double-tap pins/cycles the center slot.
+    // (Tap-to-pet mood lives inside the zone; the bar never sees it.)
+    let mut zone = deck::ZoneState::default();
+    let mut last_viz = Instant::now();
 
     let end = live_secs.map(|s| Instant::now() + Duration::from_secs_f64(s));
     eprintln!("live: tap ws squares / theme / controls; hold Fn for F-keys, Super+Ctrl themes, Super+Shift apps");
@@ -402,26 +416,46 @@ fn run_live(cfg: &config::Config, lay: &render::Layout, drm: &mut drm::DrmBacken
                 break;
             }
         }
-        // screensaver state (cached /proc scan; exit checks run 2x faster)
+        // screensaver state (cached /proc scan; exit checks run 2x faster).
+        // enter/exit only after 2 consecutive scans agree, so a single
+        // blip never flip-flops the bar.
         let now = Instant::now();
         let check_every = if saver_on { 0.5 } else { 1.0 };
         if now.duration_since(last_saver_check).as_secs_f64() > check_every {
             last_saver_check = now;
             let active = saver::saver_active();
             if active && !saver_on {
-                saver_on = true;
-                saver = Some(saver::Saver::new("OMARCHY"));
-                saver_tap_logged = false;
-                last_frame = Instant::now();
-                eprintln!("saver: desktop screensaver detected, touchbar saver on");
+                saver_hits = saver_hits.saturating_add(1);
+                saver_miss = 0;
+                if saver_hits >= 2 {
+                    saver_hits = 0;
+                    saver_on = true;
+                    saver = Some(saver::Saver::new("OMARCHY"));
+                    saver_tap_logged = false;
+                    last_frame = Instant::now();
+                    eprintln!("saver: desktop screensaver detected, touchbar saver on");
+                }
             } else if !active && saver_on {
-                saver_on = false;
-                saver = None;
-                dirty = true;
-                eprintln!("saver: desktop screensaver ended, back to normal");
+                saver_miss = saver_miss.saturating_add(1);
+                saver_hits = 0;
+                if saver_miss >= 2 {
+                    saver_miss = 0;
+                    saver_on = false;
+                    saver = None;
+                    dirty = true;
+                    eprintln!("saver: desktop screensaver ended, back to normal");
+                }
+            } else {
+                saver_hits = 0;
+                saver_miss = 0;
             }
         }
-        // poll fds (frame-rate timeout while the saver animates)
+        // poll fds (frame-rate timeout while the saver animates, or while
+        // the levels visualizer holds the slot — otherwise a 500ms block
+        // caps the visualizer at ~2fps no matter what the dirty timer says)
+        let want_fast = !saver_on
+            && (cfg.bar.show_clock || cfg.bar.show_weather)
+            && deck::select(zone.pinned) == deck::Center::Levels;
         let mut pfds: Vec<libc::pollfd> = vec![libc::pollfd {
             fd: tfd,
             events: libc::POLLIN,
@@ -441,7 +475,7 @@ fn run_live(cfg: &config::Config, lay: &render::Layout, drm: &mut drm::DrmBacken
                 revents: 0,
             });
         }
-        unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as _, if saver_on { 33 } else { 500 }) };
+        unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as _, if saver_on || want_fast { 33 } else { 500 }) };
 
         // hypr events
         if let Some(s) = ev_sock.as_mut() {
@@ -546,6 +580,16 @@ fn run_live(cfg: &config::Config, lay: &render::Layout, drm: &mut drm::DrmBacken
             for (x, y) in touch.taps.drain(..) {
                 let lx = x as f64 * render::LW / x_max;
                 let ly = y as f64 * render::LH / y_max;
+                // Double-tap anywhere in the middle zone cycles the center
+                // slot instead of firing the primary action.
+                let in_zone = lx >= lay.clk_x0 && lx < lay.wth_end;
+                if in_zone && zone.is_double_tap() {
+                    let showing = deck::select(zone.pinned);
+                    zone.cycle(showing);
+                    println!("deck: cycle -> {}", deck::select(zone.pinned).id());
+                    dirty = true;
+                    continue;
+                }
                 handle_tap(
                     cfg,
                     lay,
@@ -556,7 +600,7 @@ fn run_live(cfg: &config::Config, lay: &render::Layout, drm: &mut drm::DrmBacken
                     &mut slider,
                     &mut last_apply,
                     &mut last_toggle,
-                    &mut pet_force,
+                    &mut zone,
                     fn_held,
                     (me_l || me_r) && (ct_l || ct_r),
                     (me_l || me_r) && (sh_l || sh_r),
@@ -617,6 +661,8 @@ fn run_live(cfg: &config::Config, lay: &render::Layout, drm: &mut drm::DrmBacken
             let wm = actions::weather_mtime();
             if wm != last_weather_mtime {
                 last_weather_mtime = wm;
+                // weather text length changed -> re-tighten the block
+                *lay = render::layout(cfg);
                 dirty = true;
             }
         }
@@ -648,11 +694,19 @@ fn run_live(cfg: &config::Config, lay: &render::Layout, drm: &mut drm::DrmBacken
             dirty = false;
         }
 
-        // pixel-pet runs at 1fps while its playground is visible
-        if cfg.bar.show_clock {
+        // Center deck animates while visible: pet at 1fps, levels at ~30fps.
+        if cfg.bar.show_clock || cfg.bar.show_weather {
             let now = Instant::now();
             if now.duration_since(last_pet).as_secs_f64() >= 1.0 {
                 last_pet = now;
+                dirty = true;
+            }
+            // levels visualizer animates (~30fps) while it holds the slot
+            // (deck::select is cheap now: MPRIS status is cached 1s)
+            if deck::select(zone.pinned) == deck::Center::Levels
+                && now.duration_since(last_viz).as_secs_f64() >= 0.033
+            {
+                last_viz = now;
                 dirty = true;
             }
         }
@@ -680,7 +734,7 @@ fn run_live(cfg: &config::Config, lay: &render::Layout, drm: &mut drm::DrmBacken
             } else {
                 render::View::Normal
             };
-            let (px, stride) = render::render(cfg, &th, lay, focused, &favs, view, pet_mood_now(&mut pet_force));
+            let (px, stride) = render::render(cfg, &th, lay, focused, &favs, view, &zone, &mut icon_cache, None);
             if let Err(e) = drm.blit(&px, stride) {
                 eprintln!("render fail: {e}");
             }
@@ -779,7 +833,7 @@ fn handle_tap(
     slider: &mut Option<Slider>,
     last_apply: &mut (Instant, i32),
     last_toggle: &mut Option<(String, Instant)>,
-    pet_force: &mut Option<(render::PetMood, Instant)>,
+    zone: &mut deck::ZoneState,
     fn_held: bool,
     theme_keys: bool,
     app_keys: bool,
@@ -833,7 +887,7 @@ fn handle_tap(
     }
     if *in_menu || theme_keys {
         let items = menu_items(favs);
-        let (x0, bw) = render::menu_geometry(items.len());
+        let (x0, bw) = render::menu_geometry_cfg(items.len(), cfg, lay.btn_w);
         for (k, (name, _)) in items.iter().enumerate() {
             let bx = x0 + k as f64 * (bw + 12.0);
             if lx >= bx && lx < bx + bw {
@@ -850,7 +904,7 @@ fn handle_tap(
     if app_keys {
         // app launcher overlay (Super+Shift held): tap a button to launch.
         let n = cfg.app.len().max(1);
-        let (x0, bw) = render::menu_geometry(n);
+        let (x0, bw) = render::menu_geometry_cfg(n, cfg, lay.btn_w);
         for k in 0..cfg.app.len() {
             let bx = x0 + k as f64 * (bw + 12.0);
             if lx >= bx && lx < bx + bw {
@@ -863,7 +917,7 @@ fn handle_tap(
         return;
     }
     for k in 0..lay.ws_n {
-        let (x0, ww) = lay.ws.get(k).copied().unwrap_or((24.0, lay.btn_w));
+        let (x0, ww) = lay.ws.get(k).copied().unwrap_or((20.0, lay.btn_w));
         if lx >= x0 && lx < x0 + ww {
             let rep = hypr::focus_workspace(k as i32 + 1);
             println!("action: workspace {} -> {}", k + 1, if rep.is_empty() { "?" } else { &rep });
@@ -876,18 +930,15 @@ fn handle_tap(
         println!("menu: theme picker open");
         return;
     }
-    if lay.show_clock && lx >= lay.pet_x0 && lx < lay.pet_end {
-        // tap-to-pet: 5s of Happy (jump + smile + hearts)
-        *pet_force = Some((
-            render::PetMood::Happy,
-            Instant::now() + Duration::from_secs(5),
-        ));
-        println!("pet: petted!");
+    // Center deck: tap = the visible plugin's primary action
+    // (double-tap to cycle is handled by the caller). The deck resolves
+    // the tap to a generic effect; the bar only executes it.
+    if lx >= lay.pet_x0 && lx < lay.pet_end {
+        run_tap_effect(zone.tap_center(), last_toggle);
         return;
     }
     if lay.show_weather && lx >= lay.wth_x0 && lx < lay.wth_end {
-        actions::refresh_weather();
-        println!("weather: refresh requested");
+        run_tap_effect(zone.tap_weather(), last_toggle);
         return;
     }
     for (k, btn) in cfg.button.iter().enumerate() {
@@ -959,13 +1010,25 @@ fn handle_tap(
     }
 }
 
-/// Resolve the tap-to-pet override: Some(Happy) while the deadline holds.
-fn pet_mood_now(pet_force: &mut Option<(render::PetMood, Instant)>) -> Option<render::PetMood> {
-    match pet_force {
-        Some((m, until)) if Instant::now() < *until => Some(*m),
-        _ => {
-            *pet_force = None;
-            None
+/// Execute a generic deck tap effect. The deck decides *what* a tap means;
+/// the bar only knows these bar-level actions.
+fn run_tap_effect(effect: Option<deck::TapEffect>, last_toggle: &mut Option<(String, Instant)>) {
+    match effect {
+        None => {}
+        Some(deck::TapEffect::TogglePlayback) => {
+            if toggle_guard(last_toggle, "media") {
+                return;
+            }
+            let before = actions::mpris_status();
+            actions::mpris_toggle();
+            await_change("play/pause", &before, actions::mpris_status);
+        }
+        Some(deck::TapEffect::PomodoroTap) => {
+            println!("deck: pomodoro tap (start/pause honored by timer app)");
+        }
+        Some(deck::TapEffect::RefreshWeather) => {
+            actions::refresh_weather();
+            println!("weather: refresh requested");
         }
     }
 }

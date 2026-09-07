@@ -48,6 +48,11 @@ pub struct Bar {
     pub show_weather: bool,
     #[serde(default = "d_true")]
     pub show_theme: bool,
+    /// Theme-picker and app-launcher buttons: true (default) stretches
+    /// them to fill the bar; false gives them the same fixed width as
+    /// the strip buttons, centered.
+    #[serde(default = "d_true")]
+    pub menu_expand: bool,
     #[serde(default = "d_menu_timeout")]
     pub menu_timeout_secs: f64,
     #[serde(default = "d_slider_timeout")]
@@ -74,6 +79,7 @@ impl Default for Bar {
             show_clock: true,
             show_weather: true,
             show_theme: true,
+            menu_expand: true,
             menu_timeout_secs: 5.0,
             slider_timeout_secs: 3.0,
         }
@@ -225,6 +231,10 @@ impl Default for Config {
 }
 
 const HEADER: &str = r#"# omarchy-touchbar config — edit freely, changes apply on restart.
+# [bar] options: workspaces (1-9), show_clock, show_weather, show_theme,
+# menu_timeout_secs, slider_timeout_secs, and menu_expand (true = theme/app
+# menu buttons stretch to fill the bar; false = same fixed width as the
+# strip buttons, centered).
 # Reorder [[button]] entries to reorder the strip. Remove ones you don't
 # want, add your own:
 #

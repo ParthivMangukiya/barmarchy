@@ -1,0 +1,12 @@
+[Unit]
+Description=Touch bar visualizer audio feed (levels.json for the center deck)
+After=pipewire.service
+Wants=pipewire.service
+
+[Service]
+ExecStart=%h/.local/bin/omarchy-touchbar-viz
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

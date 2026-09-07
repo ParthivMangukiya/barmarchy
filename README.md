@@ -42,6 +42,7 @@ workspaces = 5
 show_clock = true
 show_weather = true
 show_theme = true
+menu_expand = true   # false = theme/app menu buttons use the fixed strip width
 
 [[button]]          # slider | media | mic | night | lock | command
 id = "volume"
@@ -55,6 +56,36 @@ url = "https://youtube.com/"
 ```
 
 Restart after edits: `systemctl --user restart omarchy-touchbar.service`.
+
+## Center deck plugins
+
+The strip between workspaces and controls is one dynamic zone — the
+center deck: `[clock] [pet | levels | pomodoro] [weather]`. The bar only
+grants bounds; each plugin owns what and how it draws (`src/deck.rs`:
+implement `CenterPlugin`, push it in `registry()`, no bar changes needed).
+Clock/weather are small pixel text (~35px). The center slot shows one
+plugin by priority: playing-audio levels > active pomodoro > pet. Tap =
+that plugin's action (pet, cycle visualizer style, start/pause);
+double-tap cycles pinned plugins. Playback is owned by the media
+button — tapping the visualizer never plays/pauses.
+
+Apps feed the deck via cache files (bar never captures audio itself):
+
+```bash
+# audio visualizer: viz/viz-feed.py captures the default sink monitor
+# (pw-record + FFT, 10 bands @ ~10Hz, only while MPRIS is Playing) and
+# writes levels.json. Runs as omarchy-touchbar-viz.service:
+#   viz/viz-feed.py -> ~/.local/bin/omarchy-touchbar-viz
+#   systemctl --user enable --now omarchy-touchbar-viz.service
+# manual feed (testing):
+printf '%s' '{"levels":[0.9,0.7,0.5],"label":"Spotify"}' \
+  > ~/.cache/omarchy-touchbar/deck/levels.json
+# pomodoro: timer app writes while a session runs (remove file when done)
+printf '%s' '{"active":true,"label":"24:59"}' \
+  > ~/.cache/omarchy-touchbar/deck/pomodoro.json
+```
+
+Preview offline: `--view levels`, `--view pomodoro`.
 
 Hardware overrides (only needed if probing picks wrong on your model):
 `BARMARCHY_DRM=/dev/dri/card1`, `BARMARCHY_TOUCH=/dev/input/event5`,
@@ -70,6 +101,5 @@ touchtest --saver 20  # screensaver preview on the bar
 ```
 
 `dev/` has the systemd unit template and service installer.
-`daemon/` + `poc/` are the Python ancestors, kept for reference.
 
 MIT — vibecoded with Muse Spark.

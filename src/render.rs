@@ -9,6 +9,8 @@ use std::f64::consts::PI;
 use crate::actions;
 use crate::config::{Button, Config};
 use crate::hypr;
+use crate::icons::IconCache;
+use crate::deck;
 use crate::saver::Saver;
 use crate::theme::{Rgb, Theme};
 
@@ -17,21 +19,32 @@ pub const H: i32 = 2008;
 pub const LW: f64 = 2008.0;
 pub const LH: f64 = 60.0;
 
-const EDGE: f64 = 24.0;
-const WS_GAP: f64 = 12.0; // uniform inner gap shared by ALL buttons
-const SEC_GAP: f64 = 14.0; // gaps between strip sections
+const EDGE: f64 = 20.0;
+const WS_GAP: f64 = 10.0; // uniform inner gap shared by ALL buttons
+const SEC_GAP: f64 = 12.0; // gaps between strip sections
 const MENU_GAP: f64 = 12.0;
 const FN_N: usize = 12;
 const FN_W: f64 = 158.0;
 const FN_GAP: f64 = 9.0;
 
-const PX_CELL: f64 = 9.0;
-const PX_GAP: f64 = 9.0;
-const CLK_W: f64 = 5.0 * 3.0 * PX_CELL + 4.0 * PX_GAP; // 171, full "HH:MM"
+const CLK_W: f64 = 5.0 * 3.0 * deck::TXT_CELL + 4.0 * deck::TXT_GAP; // ~133, full "HH:MM"
 // pet playground after the clock; weather sits past it, next to brightness
-const PET_W: f64 = 240.0;
-// weather block fits 5 glyphs ("-12°C") so controls never shift
-const WTH_W: f64 = 5.0 * 3.0 * PX_CELL + 4.0 * PX_GAP; // 171
+const PET_W: f64 = 200.0;
+// weather block is sized tight to the actual text (see wth_width) so a
+// short reading like "56°F" leaves no trailing gap before the controls
+
+/// Pixel width of a weather/clock string: one 3-wide cell per glyph plus
+/// the inter-glyph gap. Callers pass the exact string being drawn so the
+/// block hugs the text with no trailing gap.
+pub fn pixel_width(n_glyphs: usize) -> f64 {
+    let n = n_glyphs.max(1) as f64;
+    n * 3.0 * deck::TXT_CELL + (n - 1.0) * deck::TXT_GAP
+}
+
+/// Width of the weather block for the string about to be drawn.
+fn wth_width(s: &str) -> f64 {
+    pixel_width(s.chars().count())
+}
 
 pub const SL_TX0: f64 = 300.0;
 pub const SL_TX1: f64 = LW - 140.0;
@@ -62,15 +75,26 @@ pub struct Layout {
 }
 
 pub fn layout(cfg: &Config) -> Layout {
+    // Geometry sizes the weather block from the same string the weather
+    // plugin draws, so they always agree (see deck::weather_shown).
+    layout_with_weather(cfg, &deck::weather_shown())
+}
+
+/// Same as layout(), but sizes the weather block for an explicit string.
+/// Callers that already hold the string render() will draw should prefer
+/// this so geometry and drawing agree exactly.
+pub fn layout_with_weather(cfg: &Config, weather: &str) -> Layout {
     let ws_n = cfg.bar.workspaces.max(1).min(9);
     let n_ctl = cfg.button.len();
     let show_clock = cfg.bar.show_clock;
     let show_weather = cfg.bar.show_weather;
     let show_theme = cfg.bar.show_theme;
+    // weather hugs its text: no trailing gap before the controls
+    let wth_w = if show_weather { wth_width(weather) } else { 0.0 };
     // one width for every button on the strip
     let n_btns = (ws_n + n_ctl + if show_theme { 1 } else { 0 }).max(1) as f64;
     let inner_gaps = ((ws_n as f64 - 1.0).max(0.0) + (n_ctl as f64 - 1.0).max(0.0)) * WS_GAP;
-    let fixed = if show_clock { CLK_W } else { 0.0 } + PET_W + if show_weather { WTH_W } else { 0.0 };
+    let fixed = if show_clock { CLK_W } else { 0.0 } + PET_W + wth_w;
     let n_sec = 2.0 + if show_clock { 1.0 } else { 0.0 } + if show_weather { 1.0 } else { 0.0 }
         + if show_theme { 1.0 } else { 0.0 };
     let btn_w = ((LW - 2.0 * EDGE - fixed - n_sec * SEC_GAP - inner_gaps) / n_btns).clamp(48.0, 160.0);
@@ -84,7 +108,7 @@ pub fn layout(cfg: &Config) -> Layout {
     let pet_x0 = pet_base + SEC_GAP;
     let pet_end = pet_x0 + PET_W;
     let wth_x0 = pet_end + SEC_GAP;
-    let wth_end = if show_weather { wth_x0 + WTH_W } else { pet_end };
+    let wth_end = if show_weather { wth_x0 + wth_w } else { pet_end };
     let ctl_start = wth_end + SEC_GAP;
     let ctl = (0..n_ctl)
         .map(|k| (ctl_start + k as f64 * (btn_w + WS_GAP), btn_w))
@@ -125,11 +149,24 @@ pub fn menu_geometry(n: usize) -> (f64, f64) {
     ((LW - (n * w + (n - 1.0) * MENU_GAP)) / 2.0, w)
 }
 
-fn set_rgb(ctx: &Context, c: Rgb) {
+/// Geometry for the theme-picker and app-launcher overlays. Both always
+/// share one width: expanded to fill the bar by default, or the fixed
+/// strip-button width (centered) when `menu_expand = false`.
+pub fn menu_geometry_cfg(n: usize, cfg: &Config, btn_w: f64) -> (f64, f64) {
+    if cfg.bar.menu_expand {
+        return menu_geometry(n);
+    }
+    let n = n.max(1) as f64;
+    let w = btn_w.clamp(48.0, 200.0);
+    let total = n * w + (n - 1.0) * MENU_GAP;
+    (((LW - total) / 2.0).max(EDGE), w)
+}
+
+pub(crate) fn set_rgb(ctx: &Context, c: Rgb) {
     ctx.set_source_rgb(c.0, c.1, c.2);
 }
 
-fn rounded(ctx: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+pub(crate) fn rounded(ctx: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     ctx.new_sub_path();
     ctx.arc(x + r, y + r, r, PI, 1.5 * PI);
     ctx.arc(x + w - r, y + r, r, 1.5 * PI, 0.0);
@@ -138,7 +175,7 @@ fn rounded(ctx: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     ctx.close_path();
 }
 
-fn text_centered(
+pub(crate) fn text_centered(
     ctx: &Context,
     cx: f64,
     cy: f64,
@@ -162,296 +199,8 @@ fn text_centered(
     ext.width()
 }
 
-/// Pixel pet moods on a 54s loop: idle, dance, play, eat, sleep.
-/// Happy is never scheduled — it only triggers when you tap (pet) the cat.
-#[derive(Clone, Copy, PartialEq)]
-pub enum PetMood {
-    Idle,
-    Dance,
-    Play,
-    Eat,
-    Sleep,
-    Happy,
-}
-
-/// (mood, seconds into the current slot), derived from wall time so no
-/// daemon state is needed. PET_DEBUG="mood:secs" pins a mood for previews.
-fn pet_mood() -> (PetMood, f64) {
-    if let Ok(dbg) = std::env::var("PET_DEBUG") {
-        let mut it = dbg.split(':');
-        let mood = match it.next().unwrap_or("") {
-            "dance" => PetMood::Dance,
-            "play" => PetMood::Play,
-            "eat" => PetMood::Eat,
-            "sleep" => PetMood::Sleep,
-            "happy" => PetMood::Happy,
-            _ => PetMood::Idle,
-        };
-        let s: f64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(1.0);
-        return (mood, s);
-    }
-    let t = unsafe { libc::time(std::ptr::null_mut()) } as f64 % 54.0;
-    if t < 8.0 {
-        (PetMood::Idle, t)
-    } else if t < 14.0 {
-        (PetMood::Dance, t - 8.0)
-    } else if t < 20.0 {
-        (PetMood::Idle, t - 14.0)
-    } else if t < 26.0 {
-        (PetMood::Play, t - 20.0)
-    } else if t < 32.0 {
-        (PetMood::Eat, t - 26.0)
-    } else if t < 38.0 {
-        (PetMood::Idle, t - 32.0)
-    } else if t < 48.0 {
-        (PetMood::Sleep, t - 38.0)
-    } else {
-        (PetMood::Idle, t - 48.0)
-    }
-}
-
-const PET_OPEN: [u8; 25] = [
-    1, 0, 0, 0, 1, //
-    1, 1, 1, 1, 1, //
-    1, 0, 1, 0, 1, //
-    1, 1, 1, 1, 1, //
-    0, 1, 1, 1, 0, //
-];
-const PET_SHUT: [u8; 25] = [
-    1, 0, 0, 0, 1, //
-    1, 1, 1, 1, 1, //
-    1, 1, 1, 1, 1, //
-    1, 1, 1, 1, 1, //
-    0, 1, 1, 1, 0, //
-];
-const PET_EAT_SHUT: [u8; 25] = [
-    1, 0, 0, 0, 1, //
-    1, 1, 1, 1, 1, //
-    1, 0, 1, 0, 1, //
-    0, 1, 1, 1, 0, //
-    0, 0, 0, 0, 0, //
-];
-const PET_EAT_OPEN: [u8; 25] = [
-    1, 0, 0, 0, 1, //
-    1, 1, 1, 1, 1, //
-    1, 0, 1, 0, 1, //
-    0, 1, 0, 1, 0, //
-    0, 0, 0, 0, 0, //
-];
-const PET_WINK_L: [u8; 25] = [
-    1, 0, 0, 0, 1, //
-    1, 1, 1, 1, 1, //
-    1, 0, 1, 1, 1, //
-    1, 1, 1, 1, 1, //
-    0, 1, 1, 1, 0, //
-];
-const PET_WINK_R: [u8; 25] = [
-    1, 0, 0, 0, 1, //
-    1, 1, 1, 1, 1, //
-    1, 1, 1, 0, 1, //
-    1, 1, 1, 1, 1, //
-    0, 1, 1, 1, 0, //
-];
-const PET_SMILE: [u8; 25] = [
-    1, 0, 0, 0, 1, //
-    1, 1, 1, 1, 1, //
-    1, 1, 1, 1, 1, //
-    0, 1, 0, 1, 0, //
-    0, 1, 1, 1, 0, //
-];
-const PET_HEART: [u8; 9] = [
-    1, 0, 1, //
-    1, 1, 1, //
-    0, 1, 0, //
-];
-const PET_Z: [u8; 9] = [
-    1, 1, 1, //
-    0, 1, 0, //
-    1, 1, 1, //
-];
-
-fn pet_cells(ctx: &Context, x0: f64, y0: f64, cell: f64, cells: &[u8], cols: usize, c: Rgb, a: f64) {
-    ctx.set_source_rgba(c.0, c.1, c.2, a.clamp(0.0, 1.0));
-    for (i, v) in cells.iter().enumerate() {
-        if *v == 1 {
-            ctx.rectangle(
-                x0 + (i % cols) as f64 * cell,
-                y0 + (i / cols) as f64 * cell,
-                cell - 1.0,
-                cell - 1.0,
-            );
-        }
-    }
-    ctx.fill().ok();
-}
-
-/// The pixel pet. `cx` = playground center, `half` = roaming room.
-/// `force` (tap-to-pet) overrides the schedule with Happy.
-fn pixel_pet(ctx: &Context, theme: &Theme, cx: f64, half: f64, force: Option<PetMood>) {
-    let wall = unsafe { libc::time(std::ptr::null_mut()) } as f64;
-    let (mood, s) = match force {
-        Some(PetMood::Happy) => (PetMood::Happy, wall),
-        _ => pet_mood(),
-    };
-    let sec = s as usize;
-    let x0 = cx - 2.5 * PX_CELL;
-    let y0 = (LH - 5.0 * PX_CELL) / 2.0;
-    match mood {
-        PetMood::Idle => {
-            // blink + alternating winks across the 8s slot
-            let grid = match s % 8.0 {
-                v if v < 3.0 => &PET_OPEN,
-                v if v < 4.0 => &PET_SHUT,
-                v if v < 5.0 => &PET_OPEN,
-                v if v < 6.0 => &PET_WINK_L,
-                v if v < 7.0 => &PET_WINK_R,
-                _ => &PET_OPEN,
-            };
-            pet_cells(ctx, x0, y0, PX_CELL, grid, 5, theme.accent, 1.0);
-        }
-        PetMood::Dance => {
-            // big side-step hops across the playground
-            let hop = sec % 2 == 1;
-            let dx = if hop { 10.0 } else { -10.0 };
-            let dy = if hop { -6.0 } else { 0.0 };
-            pet_cells(ctx, x0 + dx, y0 + dy, PX_CELL, &PET_SHUT, 5, theme.accent, 1.0);
-        }
-        PetMood::Play => {
-            // chases a bouncing ball sweeping the playground
-            let bx = cx + (s / 6.0 * 6.2832).sin() * (half - 20.0);
-            let gy = y0 + 5.0 * PX_CELL - 7.0;
-            let by = gy - (s / 6.0 * 12.5664).sin().abs() * 16.0;
-            ctx.set_source_rgba(theme.fg.0, theme.fg.1, theme.fg.2, 1.0);
-            ctx.rectangle(bx - 3.5, by - 3.5, 7.0, 7.0);
-            ctx.fill().ok();
-            let dx = ((bx - cx) * 0.5).clamp(-(half - 50.0), half - 50.0);
-            let hop = (bx - cx).abs() > 12.0 && sec % 2 == 1;
-            pet_cells(
-                ctx,
-                x0 + dx,
-                y0 + if hop { -4.0 } else { 0.0 },
-                PX_CELL,
-                &PET_OPEN,
-                5,
-                theme.accent,
-                1.0,
-            );
-        }
-        PetMood::Eat => {
-            // munches from a bowl (dim row under the chin), bobbing slightly
-            let grid = if sec % 2 == 0 { &PET_EAT_SHUT } else { &PET_EAT_OPEN };
-            let bob = if sec % 2 == 0 { 0.0 } else { 1.5 };
-            pet_cells(ctx, x0, y0 + bob, PX_CELL, grid, 5, theme.accent, 1.0);
-            ctx.set_source_rgba(theme.dim.0, theme.dim.1, theme.dim.2, 1.0);
-            ctx.rectangle(x0, y0 + bob + 4.0 * PX_CELL, 5.0 * PX_CELL - 1.0, PX_CELL - 1.0);
-            ctx.fill().ok();
-        }
-        PetMood::Sleep => {
-            // breathing (slow bob) + two Z's drifting through the margin
-            let bob = (sec % 2) as f64 * 1.0;
-            pet_cells(ctx, x0, y0 + 8.0 + bob, PX_CELL, &PET_SHUT, 5, theme.accent, 0.85);
-            let p = s / 10.0;
-            for i in 0..2 {
-                let lp = p * 2.0 - i as f64;
-                if (0.0..1.0).contains(&lp) {
-                    pet_cells(
-                        ctx,
-                        x0 + 46.0 + 8.0 * lp,
-                        y0 + 20.0 - 6.0 * lp,
-                        4.0,
-                        &PET_Z,
-                        3,
-                        theme.accent,
-                        (1.0 - lp) * 0.85,
-                    );
-                }
-            }
-        }
-        PetMood::Happy => {
-            // petted! jumping smile with blush + a burst of hearts
-            let jump = (sec % 2 == 1) as usize as f64 * -6.0;
-            pet_cells(ctx, x0, y0 + jump, PX_CELL, &PET_SMILE, 5, theme.accent, 1.0);
-            // blush cheeks
-            ctx.set_source_rgba(theme.red.0, theme.red.1, theme.red.2, 0.9);
-            ctx.rectangle(x0, y0 + jump + 2.0 * PX_CELL, PX_CELL - 1.0, PX_CELL - 1.0);
-            ctx.rectangle(
-                x0 + 4.0 * PX_CELL,
-                y0 + jump + 2.0 * PX_CELL,
-                PX_CELL - 1.0,
-                PX_CELL - 1.0,
-            );
-            ctx.fill().ok();
-            for i in 0..3 {
-                let ph = ((wall + i as f64 * 1.7) % 5.0) / 5.0;
-                pet_cells(
-                    ctx,
-                    x0 + 4.0 + i as f64 * 14.0 + (wall * 2.0 + i as f64).sin() * 3.0,
-                    y0 - 4.0 - ph * 22.0,
-                    4.0,
-                    &PET_HEART,
-                    3,
-                    theme.red,
-                    (1.0 - ph) * 0.95,
-                );
-            }
-        }
-    }
-}
-
-fn now_hhmm() -> String {
-    unsafe {
-        let t = libc::time(std::ptr::null_mut());
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut tm);
-        format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
-    }
-}
-
-// 3x5 pixel glyphs (clock + weather)
-fn digit(ch: char) -> Option<[u8; 15]> {
-    let d: [u8; 15] = match ch {
-        '0' => [1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1],
-        '1' => [0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1],
-        '2' => [1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1],
-        '3' => [1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1],
-        '4' => [1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 0, 0, 1],
-        '5' => [1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 1],
-        '6' => [1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1],
-        '7' => [1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0],
-        '8' => [1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1],
-        '9' => [1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1],
-        ':' => [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
-        '-' => [0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0],
-        '°' => [1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        'C' => [1, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1],
-        'F' => [1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0],
-        _ => return None,
-    };
-    Some(d)
-}
-
-fn pixel_text(ctx: &Context, theme: &Theme, mut x: f64, s: &str) {
-    let top = (LH - 5.0 * PX_CELL) / 2.0;
-    for ch in s.chars() {
-        let Some(g) = digit(ch) else { continue };
-        let color = if ch == ':' || ch == '°' { theme.accent } else { theme.fg };
-        set_rgb(ctx, color);
-        for r in 0..5 {
-            for c in 0..3 {
-                if g[r * 3 + c] == 1 {
-                    ctx.rectangle(
-                        x + c as f64 * PX_CELL,
-                        top + r as f64 * PX_CELL,
-                        PX_CELL - 1.0,
-                        PX_CELL - 1.0,
-                    );
-                }
-            }
-        }
-        ctx.fill().ok();
-        x += 3.0 * PX_CELL + PX_GAP;
-    }
-}
+// Middle-zone (center deck) drawing lives in `deck.rs`: plugins own their
+// pixels, the bar only grants bounds via `deck::render_middle()`.
 
 /// Webapp icons, all verified on-device. Omarchy webapps all run as
 /// `chromium --app=<url>`, so WM class is usually generic ("chromium") or
@@ -466,13 +215,20 @@ fn host_glyph(host: &str) -> Option<(&'static str, &'static str)> {
         ("twitter", NERD, ""),     // \uf099 bird
         ("whatsapp", NERD, ""),    // \uf232
         ("discord", NERD, "󰙯"),     // mdi \U000f066f (\uf392 is tofu here)
+        ("calendar", NERD, ""), // calendar
+        ("contacts", NERD, ""), // contacts
+        ("maps", NERD, ""), // maps pin
+        ("settings", NERD, ""), // settings
         ("github", NERD, ""),      // \uf09b
         ("zoom", NERD, ""),        // \uf03d
+        ("gmail", NERD, ""), // mail
+        ("mail", NERD, ""), // mail
+        ("drive", NERD, ""), // drive
+        ("meet", NERD, ""), // video call
+        ("docs", NERD, ""), // docs
         ("google", NERD, ""),      // \uf1a0 Maps/Photos/...
-        ("maps", NERD, ""),
-        ("photos", NERD, ""),
-        ("contacts", NERD, ""),
-        ("messages", NERD, ""),
+        ("photos", NERD, ""), // photos
+        ("messages", NERD, ""), // messages
     ];
     for (key, font, g) in TABLE {
         if host.contains(key) {
@@ -495,12 +251,62 @@ fn is_generic_browser(low: &str) -> bool {
 pub fn glyph_for_wmclass(class: &str, title: &str) -> Option<(&'static str, &'static str)> {
     // exact app classes first
     if class == "foot" {
-        return Some((NERD, "\u{F489}"));
+        return Some((NERD, ""));
     }
     if class == "org.omarchy.agent" {
         return Some(("Sans", "▲"));
     }
     let low = class.to_lowercase();
+    // common desktop apps by class keyword (order matters: specific first).
+    // Nautilus (Files) reports class "org.gnome.Nautilus".
+    const CLASS_TABLE: &[(&str, &str, &str)] = &[
+        ("nautilus", NERD, "\u{F07B}"),       // files
+        ("thunar", NERD, "\u{F07B}"),         // files
+        ("dolphin", NERD, "\u{F07B}"),        // files
+        ("nemo", NERD, "\u{F07B}"),           // files
+        ("alacritty", NERD, "\u{F489}"),      // terminal
+        ("kitty", NERD, "\u{F489}"),          // terminal
+        ("ghostty", NERD, "\u{F489}"),        // terminal
+        ("wezterm", NERD, "\u{F489}"),        // terminal
+        ("gnome-terminal", NERD, "\u{F489}"), // terminal
+        ("ptyxis", NERD, "\u{F489}"),         // terminal
+        ("konsole", NERD, "\u{F489}"),        // terminal
+        ("xterm", NERD, "\u{F489}"),          // terminal
+        ("vscodium", NERD, "\u{E70C}"),       // vscode
+        ("code", NERD, "\u{E70C}"),           // vscode
+        ("neovim", NERD, "\u{E62B}"),         // vim
+        ("nvim", NERD, "\u{E62B}"),           // vim
+        ("vim", NERD, "\u{E62B}"),            // vim
+        ("emacs", NERD, "\u{E632}"),          // emacs
+        ("firefox", NERD, "\u{F269}"),        // browser
+        ("brave", NERD, "\u{E639}"),          // browser
+        ("chromium", NERD, "\u{F268}"),       // browser
+        ("obsidian", NERD, "\u{E63A}"),       // notes
+        ("spotify", NERD, "\u{F1BC}"),        // music
+        ("discord", NERD, "\u{F066F}"),       // chat (mdi)
+        ("telegram", NERD, "\u{F2C6}"),       // chat
+        ("slack", NERD, "\u{F198}"),          // chat
+        ("whatsapp", NERD, "\u{F232}"),       // chat
+        ("zoom", NERD, "\u{F03D}"),           // meeting
+        ("vlc", NERD, "\u{F07C4}"),           // video (mdi)
+        ("gimp", NERD, "\u{F1C5}"),           // image
+        ("steam", NERD, "\u{F1B6}"),          // games
+        ("calendar", NERD, ""), // calendar
+        ("contacts", NERD, ""), // contacts
+        ("maps", NERD, ""), // maps pin
+        ("settings", NERD, ""), // settings
+        ("localsend", NERD, ""),       // send
+        ("github", NERD, "\u{F09B}"),         // dev
+    ];
+    for (key, font, g) in CLASS_TABLE {
+        if low.contains(key) {
+            return Some((*font, *g));
+        }
+    }
+    // zen browser (kept out of the table: bare "zen" would also match zenity)
+    if low == "zen" || low.contains("zen-browser") {
+        return Some((NERD, ""));
+    }
     // PWA class "chrome-<host>__..." carries the real site
     if low.starts_with("chrome-") {
         if let Some(rest) = low.strip_prefix("chrome-") {
@@ -523,12 +329,19 @@ pub fn glyph_for_wmclass(class: &str, title: &str) -> Option<(&'static str, &'st
             ("twitter", NERD, ""),
             ("whatsapp", NERD, ""),
             ("discord", NERD, "󰙯"),
+            ("calendar", NERD, ""), // calendar
+            ("contacts", NERD, ""), // contacts
+            ("maps", NERD, ""), // maps pin
+            ("settings", NERD, ""), // settings
             ("github", NERD, ""),
             ("zoom", NERD, ""),
-            ("maps", NERD, ""),
-            ("photos", NERD, ""),
-            ("contacts", NERD, ""),
-            ("messages", NERD, ""),
+            ("photos", NERD, ""), // photos
+            ("messages", NERD, ""), // messages
+            ("gmail", NERD, ""), // mail
+            ("mail", NERD, ""), // mail
+            ("drive", NERD, ""), // drive
+            ("meet", NERD, ""), // video call
+            ("docs", NERD, ""), // docs
             ("google", NERD, ""),
         ];
         for (key, font, g) in TITLE_KEYS {
@@ -541,6 +354,97 @@ pub fn glyph_for_wmclass(class: &str, title: &str) -> Option<(&'static str, &'st
     None
 }
 
+/// One app slot on a workspace button: a real theme icon when the
+/// .desktop lookup succeeds, otherwise the nerd-font fallback glyph.
+#[derive(Clone)]
+pub enum WsIcon {
+    Glyph(&'static str, &'static str),
+    Image(cairo::ImageSurface),
+}
+
+fn ws_cell_width(ctx: &Context, icon: &WsIcon, glyph_size: f64, img_box: f64) -> f64 {
+    match icon {
+        WsIcon::Glyph(font, g) => {
+            ctx.select_font_face(font, FontSlant::Normal, FontWeight::Bold);
+            ctx.set_font_size(glyph_size);
+            ctx.text_extents(g).map(|e| e.width()).unwrap_or(0.0)
+        }
+        WsIcon::Image(s) => {
+            let (w, h) = (s.width() as f64, s.height() as f64);
+            if w <= 0.0 || h <= 0.0 {
+                img_box
+            } else {
+                (img_box * w / h).clamp(10.0, img_box * 1.6)
+            }
+        }
+    }
+}
+
+fn ws_cell_widths(ctx: &Context, icons: &[WsIcon], glyph_size: f64, img_box: f64) -> Vec<f64> {
+    icons
+        .iter()
+        .map(|i| ws_cell_width(ctx, i, glyph_size, img_box))
+        .collect()
+}
+
+fn ws_icon_widths(ctx: &Context, icons: &[(&str, &str)], size: f64) -> Vec<f64> {
+    icons
+        .iter()
+        .map(|(font, g)| {
+            ctx.select_font_face(font, FontSlant::Normal, FontWeight::Bold);
+            ctx.set_font_size(size);
+            ctx.text_extents(g).map(|e| e.width()).unwrap_or(0.0)
+        })
+        .collect()
+}
+
+fn ws_draw_cell(
+    ctx: &Context,
+    theme: &Theme,
+    icon: &WsIcon,
+    gx: f64,
+    center_y: f64,
+    glyph_size: f64,
+    img_box: f64,
+) {
+    match icon {
+        WsIcon::Glyph(font, g) => ws_draw_icon(ctx, theme, gx, center_y, font, g, glyph_size),
+        WsIcon::Image(s) => {
+            let (w, h) = (s.width() as f64, s.height() as f64);
+            if w <= 0.0 || h <= 0.0 {
+                return;
+            }
+            let sc = img_box / h;
+            let _ = ctx.save();
+            ctx.translate(gx, center_y - img_box / 2.0);
+            ctx.scale(sc, sc);
+            ctx.set_source_surface(s, 0.0, 0.0).ok();
+            ctx.paint().ok();
+            let _ = ctx.restore();
+        }
+    }
+}
+
+fn ws_draw_icon(
+    ctx: &Context,
+    theme: &Theme,
+    gx: f64,
+    center_y: f64,
+    font: &str,
+    g: &str,
+    size: f64,
+) {
+    ctx.select_font_face(font, FontSlant::Normal, FontWeight::Bold);
+    ctx.set_font_size(size);
+    let ge = ctx.text_extents(g).expect("extents");
+    ctx.move_to(
+        gx - ge.x_bearing(),
+        center_y - (ge.height() / 2.0 + ge.y_bearing()),
+    );
+    set_rgb(ctx, theme.fg);
+    ctx.show_text(g).ok();
+}
+
 fn ws_button(
     ctx: &Context,
     x: f64,
@@ -549,7 +453,7 @@ fn ws_button(
     h: f64,
     theme: &Theme,
     num: usize,
-    glyphs: &[(&str, &str)],
+    glyphs: &[WsIcon],
     is_active: bool,
     has_windows: bool,
 ) {
@@ -576,41 +480,83 @@ fn ws_button(
     } else {
         theme.dim
     };
+    // the number is always left-aligned; app icons flow next to it.
+    // up to 4 icons: the first two sit beside the number, the 3rd/4th
+    // drop to a bottom row so nothing ever leaves the button.
+    const PAD_L: f64 = 10.0;
+    const PAD_R: f64 = 8.0;
     ctx.select_font_face("Sans", FontSlant::Normal, FontWeight::Bold);
     ctx.set_font_size(27.0);
     let ext = ctx.text_extents(&num.to_string()).expect("extents");
-    let mut icon_widths = vec![];
-    for (font, g) in glyphs.iter().take(3) {
-        ctx.select_font_face(font, FontSlant::Normal, FontWeight::Bold);
-        ctx.set_font_size(25.0);
-        icon_widths.push(ctx.text_extents(g).map(|e| e.width()).unwrap_or(0.0));
-    }
-    let total = ext.width() + icon_widths.iter().sum::<f64>() + 14.0 + icon_widths.len() as f64 * 10.0;
-    let mut gx = x + (w - total) / 2.0;
-    ctx.select_font_face("Sans", FontSlant::Normal, FontWeight::Bold);
-    ctx.set_font_size(27.0);
     ctx.move_to(
-        gx - ext.x_bearing(),
+        x + PAD_L - ext.x_bearing(),
         cy - (ext.height() / 2.0 + ext.y_bearing()),
     );
     set_rgb(ctx, num_color);
     ctx.show_text(&num.to_string()).ok();
-    gx += ext.width() + 14.0;
-    for ((font, g), iw) in glyphs.iter().take(3).zip(icon_widths.iter()) {
-        if gx + iw > x + w - 8.0 {
-            break;
-        }
-        ctx.select_font_face(font, FontSlant::Normal, FontWeight::Bold);
-        ctx.set_font_size(25.0);
-        let ge = ctx.text_extents(g).expect("extents");
-        ctx.move_to(
-            gx - ge.x_bearing(),
-            cy - (ge.height() / 2.0 + ge.y_bearing()),
-        );
-        set_rgb(ctx, theme.fg);
-        ctx.show_text(g).ok();
-        gx += iw + 10.0;
+    let icons: &[WsIcon] = &glyphs[..glyphs.len().min(4)];
+    if icons.is_empty() {
+        return;
     }
+    // clip icon drawing to the pill so icons can never bleed over neighbors
+    let _ = ctx.save();
+    rounded(ctx, x, y, w, h, 12.0);
+    ctx.clip();
+    let ix = x + PAD_L + ext.width() + 8.0;
+    let avail = (x + w - PAD_R - ix).max(0.0);
+    let edge = x + w - PAD_R + 1.0;
+    if icons.len() <= 2 {
+        // single row beside the number, vertically centered
+        let mut size = 25.0;
+        let mut widths = ws_cell_widths(ctx, icons, size, 30.0);
+        let mut total = widths.iter().sum::<f64>() + (widths.len() as f64 - 1.0) * 8.0;
+        while total > avail && size > 16.0 {
+            size -= 1.0;
+            widths = ws_cell_widths(ctx, icons, size, 30.0);
+            total = widths.iter().sum::<f64>() + (widths.len() as f64 - 1.0) * 8.0;
+        }
+        let mut gx = ix;
+        for (icon, iw) in icons.iter().zip(widths.iter()) {
+            if gx + iw > edge {
+                break;
+            }
+            ws_draw_cell(ctx, theme, icon, gx, cy, size, 30.0);
+            gx += iw + 8.0;
+        }
+    } else {
+        // 2x2 grid: first pair on top, 3rd/4th on the bottom row
+        let (top, bot) = icons.split_at(2);
+        let mut size = 18.0;
+        let (c0, _c1) = loop {
+            let wt = ws_cell_widths(ctx, top, size, 21.0);
+            let wb = ws_cell_widths(ctx, bot, size, 21.0);
+            let c0 = wt[0].max(*wb.first().unwrap_or(&0.0));
+            let c1 = wt[1].max(wb.get(1).copied().unwrap_or(0.0));
+            if c0 + 6.0 + c1 <= avail || size <= 13.0 {
+                break (c0, c1);
+            }
+            size -= 1.0;
+        };
+        let top_cy = y + h * 0.30;
+        let bot_cy = y + h * 0.72;
+        let wt = ws_cell_widths(ctx, top, size, 21.0);
+        let wb = ws_cell_widths(ctx, bot, size, 21.0);
+        for (k, (icon, iw)) in top.iter().zip(wt.iter()).enumerate() {
+            let gx = if k == 0 { ix } else { ix + c0 + 6.0 };
+            if gx + iw > edge {
+                continue;
+            }
+            ws_draw_cell(ctx, theme, icon, gx, top_cy, size, 21.0);
+        }
+        for (k, (icon, iw)) in bot.iter().zip(wb.iter()).enumerate() {
+            let gx = if k == 0 { ix } else { ix + c0 + 6.0 };
+            if gx + iw > edge {
+                continue;
+            }
+            ws_draw_cell(ctx, theme, icon, gx, bot_cy, size, 21.0);
+        }
+    }
+    let _ = ctx.restore();
 }
 
 fn theme_button(
@@ -681,15 +627,24 @@ fn app_button(ctx: &Context, x: f64, y: f64, w: f64, h: f64, app: &AppItem) {
     ctx.stroke().ok();
     let cy = y + h / 2.0;
     let font = if app.sans { "Sans" } else { NERD };
-    // measure icon + name as a group so the pair sits centered
+    // measure icon + name as a group so the pair sits centered;
+    // shrink the name until it fits inside fixed-width buttons
     ctx.select_font_face(font, FontSlant::Normal, FontWeight::Bold);
     ctx.set_font_size(26.0);
     let ie = ctx.text_extents(&app.icon).expect("extents");
     ctx.select_font_face("Sans", FontSlant::Normal, FontWeight::Bold);
     ctx.set_font_size(17.0);
-    let short: String = app.name.chars().take(10).collect();
-    let ne = ctx.text_extents(&short).expect("extents");
-    let total = ie.width() + 10.0 + ne.width();
+    let mut short: String = app.name.chars().take(10).collect();
+    let mut ne = ctx.text_extents(&short).expect("extents");
+    let mut total = ie.width() + 10.0 + ne.width();
+    while total > w - 16.0 && short.len() > 1 {
+        short.pop();
+        ne = ctx.text_extents(&short).expect("extents");
+        total = ie.width() + 10.0 + ne.width();
+    }
+    let _ = ctx.save();
+    rounded(ctx, x, y, w, h, 12.0);
+    ctx.clip();
     let mut gx = x + (w - total) / 2.0;
     ctx.select_font_face(font, FontSlant::Normal, FontWeight::Bold);
     ctx.set_font_size(26.0);
@@ -708,6 +663,7 @@ fn app_button(ctx: &Context, x: f64, y: f64, w: f64, h: f64, app: &AppItem) {
     );
     set_rgb(ctx, accent);
     ctx.show_text(&short).ok();
+    let _ = ctx.restore();
 }
 
 fn ctl_button(ctx: &Context, x: f64, y: f64, w: f64, h: f64, icon: &str, fg: Rgb, dim: Rgb) {
@@ -802,6 +758,8 @@ pub enum View<'a> {
 }
 
 /// Render a frame. Returns (pixel bytes ARGB32, stride).
+/// The bar grants the middle-zone bounds; deck plugins own all drawing.
+/// `forced` previews one center plugin (offline `--view`); live passes None.
 pub fn render(
     cfg: &Config,
     theme: &Theme,
@@ -809,7 +767,9 @@ pub fn render(
     focused: i32,
     favs: &[(String, Rgb)],
     view: View,
-    pet_force: Option<PetMood>,
+    zone: &deck::ZoneState,
+    icons: &mut IconCache,
+    forced: Option<deck::Center>,
 ) -> (Vec<u8>, usize) {
     let mut surf =
         ImageSurface::create(Format::ARgb32, W, H).expect("cairo surface");
@@ -827,7 +787,7 @@ pub fn render(
 
         match view {
             View::Menu(items) => {
-                let (x0, bw) = menu_geometry(items.len());
+                let (x0, bw) = menu_geometry_cfg(items.len(), cfg, lay.btn_w);
                 let mut x = x0;
                 for (name, accent) in items {
                     theme_button(
@@ -846,7 +806,7 @@ pub fn render(
                 }
             }
             View::Apps(apps) => {
-                let (x0, bw) = menu_geometry(apps.len());
+                let (x0, bw) = menu_geometry_cfg(apps.len(), cfg, lay.btn_w);
                 let mut x = x0;
                 for app in apps {
                     app_button(&ctx, x, by, bw, bh, app);
@@ -862,18 +822,25 @@ pub fn render(
                 let clients = hypr::clients();
                 let open: std::collections::HashSet<i32> =
                     ws.iter().map(|w| w.id).collect();
-                let mut ws_apps: std::collections::HashMap<i32, Vec<(&str, &str)>> =
+                let mut ws_apps: std::collections::HashMap<i32, Vec<WsIcon>> =
                     std::collections::HashMap::new();
                 for c in &clients {
                     if (1..=lay.ws_n as i32).contains(&c.ws_id) {
-                        if let Some(g) = glyph_for_wmclass(&c.class, &c.title) {
-                            ws_apps.entry(c.ws_id).or_default().push(g);
+                        // real theme icon first (like the Omarchy menu),
+                        // nerd-font glyph as fallback
+                        if let Some(img) = icons.surface_for_class(&c.class) {
+                            ws_apps.entry(c.ws_id).or_default().push(WsIcon::Image(img));
+                        } else if let Some(g) = glyph_for_wmclass(&c.class, &c.title) {
+                            ws_apps
+                                .entry(c.ws_id)
+                                .or_default()
+                                .push(WsIcon::Glyph(g.0, g.1));
                         }
                     }
                 }
                 for k in 0..lay.ws_n {
                     let i = k as i32 + 1;
-                    let empty: Vec<(&str, &str)> = vec![];
+                    let empty: Vec<WsIcon> = vec![];
                     let glyphs = ws_apps.get(&i).unwrap_or(&empty);
                     let (wx, ww) = lay.ws.get(k).copied().unwrap_or((EDGE, lay.btn_w));
                     ws_button(
@@ -890,23 +857,8 @@ pub fn render(
                     );
                 }
 
-                if lay.show_clock {
-                    pixel_text(&ctx, theme, lay.clk_x0, &now_hhmm());
-                    pixel_pet(
-                        &ctx,
-                        theme,
-                        (lay.pet_x0 + lay.pet_end) / 2.0,
-                        PET_W / 2.0,
-                        pet_force,
-                    );
-                }
-
-                if lay.show_weather {
-                    // pixel temperature ("21°C"); "--°" until first fetch lands
-                    let w = actions::weather_read();
-                    let s = if w.is_empty() { "--°".to_string() } else { w };
-                    pixel_text(&ctx, theme, lay.wth_x0, &s);
-                }
+                // Center deck: the bar grants bounds, plugins draw.
+                deck::render_middle(&ctx, theme, lay, zone, forced);
 
                 // state-aware icons for toggle buttons
                 let playing = actions::mpris_status().as_deref() == Some("Playing");
@@ -920,10 +872,12 @@ pub fn render(
                             theme.accent,
                         ),
                         "media" => (
+                            // F04B = play glyph, F04C = pause glyph: show
+                            // what the tap will do (pause while playing).
                             if playing {
-                                "\u{F04B}".into()
-                            } else {
                                 "\u{F04C}".into()
+                            } else {
+                                "\u{F04B}".into()
                             },
                             theme.accent,
                         ),
