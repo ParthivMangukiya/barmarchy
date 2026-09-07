@@ -400,10 +400,18 @@ fn run_live(cfg: &config::Config, lay: &mut render::Layout, drm: &mut drm::DrmBa
     // debounce: single-scan blips (launch/teardown wrappers) must not flip us
     let mut saver_hits: u8 = 0;
     let mut saver_miss: u8 = 0;
+    // screen lock: the panel goes dark while the shell lock screen is up
+    // (privacy). Detection is the shell's own `lock isLocked` IPC —
+    // fail-open, polled here at a 1s cadence since it forks.
+    let mut locked = false;
+    let mut last_lock_check = Instant::now() - Duration::from_secs(10);
     let mut icon_cache = icons::IconCache::new();
     // Center deck state: double-tap pins/cycles the center slot.
     // (Tap-to-pet mood lives inside the zone; the bar never sees it.)
     let mut zone = deck::ZoneState::default();
+    // visualizer/title rotation from [deck] (0 marquee = title disabled)
+    zone.viz_secs = cfg.deck.viz_secs.max(0.0);
+    zone.marquee_secs = cfg.deck.marquee_secs.max(0.0);
     let mut last_viz = Instant::now();
 
     let end = live_secs.map(|s| Instant::now() + Duration::from_secs_f64(s));
@@ -448,6 +456,25 @@ fn run_live(cfg: &config::Config, lay: &mut render::Layout, drm: &mut drm::DrmBa
             } else {
                 saver_hits = 0;
                 saver_miss = 0;
+            }
+        }
+        // lock state: blank the panel the moment the shell reports locked,
+        // resume on unlock (without flashing the bar if the saver runs).
+        if now.duration_since(last_lock_check).as_secs_f64() > 1.0 {
+            last_lock_check = now;
+            let is_locked = actions::session_locked();
+            if is_locked && !locked {
+                locked = true;
+                let (px, stride) = render::render_blank();
+                if let Err(e) = drm.blit(&px, stride) {
+                    eprintln!("render fail: {e}");
+                }
+                dirty = false;
+                eprintln!("lock: session locked, bar blanked");
+            } else if !is_locked && locked {
+                locked = false;
+                dirty = !saver_on;
+                eprintln!("lock: session unlocked, back to normal");
             }
         }
         // poll fds (frame-rate timeout while the saver animates, or while
@@ -565,10 +592,11 @@ fn run_live(cfg: &config::Config, lay: &mut render::Layout, drm: &mut drm::DrmBa
             }
         }
 
-        // touch (ignored while the saver runs — the desktop is covered)
+        // touch (ignored while the saver runs or the session is locked —
+        // the desktop is covered; taps must never toggle anything unseen)
         if pfds[0].revents & libc::POLLIN != 0 {
             feed_touch(tfd, &mut touch);
-            if saver_on {
+            if saver_on || locked {
                 if !touch.taps.is_empty() {
                     touch.taps.clear();
                     if !saver_tap_logged {
@@ -678,6 +706,14 @@ fn run_live(cfg: &config::Config, lay: &mut render::Layout, drm: &mut drm::DrmBa
                 slider = None;
                 dirty = true;
             }
+        }
+
+        // locked panel stays blank: taps were drained above, and nothing
+        // may render until unlock (which re-dirties). Blank wins over the
+        // saver below — no bar art while locked.
+        if locked {
+            dirty = false;
+            continue;
         }
 
         // saver animates every frame and wins over all other views.

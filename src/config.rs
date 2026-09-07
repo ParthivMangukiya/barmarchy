@@ -71,6 +71,12 @@ fn d_menu_timeout() -> f64 {
 fn d_slider_timeout() -> f64 {
     3.0
 }
+fn d_viz_secs() -> f64 {
+    8.0
+}
+fn d_marquee_secs() -> f64 {
+    4.0
+}
 
 impl Default for Bar {
     fn default() -> Self {
@@ -82,6 +88,26 @@ impl Default for Bar {
             menu_expand: true,
             menu_timeout_secs: 5.0,
             slider_timeout_secs: 3.0,
+        }
+    }
+}
+
+/// Center-deck visualizer rotation: while music plays, the levels slot
+/// alternates between the bouncing visualizer and a scrolling now-playing
+/// title. `marquee_secs = 0` disables the title (visualizer always).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Deck {
+    #[serde(default = "d_viz_secs")]
+    pub viz_secs: f64,
+    #[serde(default = "d_marquee_secs")]
+    pub marquee_secs: f64,
+}
+
+impl Default for Deck {
+    fn default() -> Self {
+        Self {
+            viz_secs: 8.0,
+            marquee_secs: 4.0,
         }
     }
 }
@@ -111,6 +137,8 @@ pub struct Button {
 pub struct Config {
     #[serde(default)]
     pub bar: Bar,
+    #[serde(default)]
+    pub deck: Deck,
     #[serde(default = "default_buttons")]
     pub button: Vec<Button>,
     /// App launcher menu (Super+Shift overlay). Add your own entries freely:
@@ -224,6 +252,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             bar: Bar::default(),
+            deck: Deck::default(),
             button: default_buttons(),
             app: default_apps(),
         }
@@ -235,6 +264,9 @@ const HEADER: &str = r#"# omarchy-touchbar config — edit freely, changes apply
 # menu_timeout_secs, slider_timeout_secs, and menu_expand (true = theme/app
 # menu buttons stretch to fill the bar; false = same fixed width as the
 # strip buttons, centered).
+# [deck] options: while music plays, the center slot alternates between
+# the visualizer (viz_secs) and a scrolling now-playing title
+# (marquee_secs). marquee_secs = 0 disables the title forever.
 # Reorder [[button]] entries to reorder the strip. Remove ones you don't
 # want, add your own:
 #
@@ -288,6 +320,7 @@ pub fn load() -> Config {
             if !text.contains("[[app]]") {
                 let apps_toml = toml::to_string_pretty(&Config {
                     bar: Bar::default(),
+                    deck: Deck::default(),
                     button: vec![],
                     app: default_apps(),
                 })

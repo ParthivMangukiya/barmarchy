@@ -50,6 +50,10 @@ show_weather = true
 show_theme = true
 menu_expand = true   # false = theme/app menu buttons use the fixed strip width
 
+[deck]
+viz_secs = 8.0       # visualizer phase per rotation while playing
+marquee_secs = 4.0   # now-playing title phase (0 = title disabled forever)
+
 [[button]]          # slider | media | mic | night | lock | command
 id = "volume"
 kind = "slider"
@@ -73,7 +77,9 @@ Clock/weather are small pixel text (~35px). The center slot shows one
 plugin by priority: playing-audio levels > active pomodoro > pet. Tap =
 that plugin's action (pet, cycle visualizer style, start/pause);
 double-tap cycles pinned plugins. Playback is owned by the media
-button — tapping the visualizer never plays/pauses.
+button — tapping the visualizer never plays/pauses. While music plays,
+the levels slot rotates between the visualizer and a scrolling
+now-playing title (`[deck] viz_secs` / `marquee_secs`).
 
 Apps feed the deck via cache files (bar never captures audio itself):
 

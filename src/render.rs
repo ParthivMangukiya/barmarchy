@@ -955,6 +955,14 @@ pub fn render_saver(sv: &Saver) -> (Vec<u8>, usize) {
     (data, stride)
 }
 
+/// All-black frame for the lock screen: the panel stays dark while the
+/// session is locked. Returns (pixel bytes ARGB32, stride).
+pub fn render_blank() -> (Vec<u8>, usize) {
+    // ARGB32 64x2008, cairo row stride 256; zeros = black.
+    let stride = W as usize * 4;
+    (vec![0u8; stride * H as usize], stride)
+}
+
 /// Default icon/label for builtin slider targets (when config omits them).
 pub fn slider_defaults(target: &str) -> (&'static str, &'static str) {
     match target {

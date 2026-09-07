@@ -145,6 +145,8 @@ fn registry(zone: &ZoneState) -> Vec<Box<dyn CenterPlugin>> {
             feed: read_levels(),
             playing: is_playing(),
             style: viz,
+            viz_secs: zone.viz_secs,
+            marquee_secs: zone.marquee_secs,
         }),
         Box::new(PomodoroPlugin { feed: read_pomodoro() }),
         Box::new(PetPlugin { force: zone.pet_override() }),
@@ -260,6 +262,26 @@ pub fn is_playing() -> bool {
     v
 }
 
+/// Cached now-playing (title, artist), 2s TTL — a metadata miss forks
+/// busctl twice, and the visualizer draws at ~30fps.
+pub fn track_info() -> Option<(String, String)> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<(Option<(String, String)>, Option<Instant>)>,
+    > = std::sync::OnceLock::new();
+    let lock = CACHE.get_or_init(|| std::sync::Mutex::new((None, None)));
+    if let Ok(guard) = lock.lock() {
+        if let Some(t) = guard.1 {
+            if t.elapsed() < Duration::from_secs(2) {
+                return guard.0.clone();
+            }
+        }
+    }
+    let v = actions::mpris_metadata();
+    if let Ok(mut guard) = lock.lock() {
+        *guard = (v.clone(), Some(Instant::now()));
+    }
+    v
+}
 /// Wall clock with millisecond precision (libc::time() is 1s-granular —
 /// too steppy for the visualizer idle wave / smoothing).
 fn now_secs() -> f64 {
@@ -319,13 +341,30 @@ pub fn select(pinned: Option<Center>) -> Center {
 // ---------------------------------------------------------------------------
 
 /// Middle-zone interaction state: double-tap pin/cycle + tap-to-pet mood
-/// + visualizer style.
-#[derive(Debug, Default)]
+/// + visualizer style and rotation timing.
+#[derive(Debug)]
 pub struct ZoneState {
     pub pinned: Option<Center>,
     pub viz: VizStyle,
+    /// Seconds of visualizer per rotation cycle (from `[deck] viz_secs`).
+    pub viz_secs: f64,
+    /// Seconds of now-playing title per cycle (`0` = title disabled).
+    pub marquee_secs: f64,
     last_tap: Option<Instant>,
     pet_until: Option<Instant>,
+}
+
+impl Default for ZoneState {
+    fn default() -> Self {
+        Self {
+            pinned: None,
+            viz: VizStyle::default(),
+            viz_secs: 8.0,
+            marquee_secs: 4.0,
+            last_tap: None,
+            pet_until: None,
+        }
+    }
 }
 
 impl ZoneState {
@@ -766,6 +805,8 @@ struct LevelsPlugin {
     feed: Option<LevelsFeed>,
     playing: bool,
     style: VizStyle,
+    viz_secs: f64,
+    marquee_secs: f64,
 }
 
 impl LevelsPlugin {
@@ -814,6 +855,105 @@ fn seg_color(theme: &Theme, t: f64) -> Rgb {
     }
 }
 
+impl LevelsPlugin {
+    /// Rotation state: which title the current cycle belongs to and when
+    /// its viz phase started. Returns (show_marquee, marquee_elapsed).
+    /// The title phase always lasts at least one full scroll pass
+    /// (`(slot + text) / SPEED`), however long the title is — the cycle
+    /// never cuts a title mid-scroll. A new track restarts the cycle at
+    /// its title, so you read the new song immediately.
+    fn rotation(&self, text: &str, tw: f64, w: f64) -> (bool, f64) {
+        static ROT: std::sync::OnceLock<std::sync::Mutex<(String, Option<Instant>)>> =
+            std::sync::OnceLock::new();
+        let lock = ROT.get_or_init(|| std::sync::Mutex::new((String::new(), None)));
+        let Ok(mut g) = lock.lock() else {
+            return (true, 0.0);
+        };
+        let now_i = Instant::now();
+        let viz = self.viz_secs.max(0.0);
+        if g.0 != text {
+            g.0 = text.to_string();
+            // pretend the viz phase already elapsed: title shows first
+            g.1 = now_i
+                .checked_sub(Duration::from_secs_f64(viz))
+                .or(Some(now_i));
+        }
+        let start = g.1.unwrap_or(now_i);
+        let pass = (w + tw) / MARQ_SPEED; // one full enter→exit scroll
+        let marquee_len = self.marquee_secs.max(0.0).max(pass);
+        let total = viz + marquee_len;
+        let mut elapsed = now_i.duration_since(start).as_secs_f64();
+        if total > 0.0 && elapsed >= total {
+            g.1 = Some(now_i);
+            elapsed = 0.0;
+        }
+        (elapsed >= viz, (elapsed - viz).max(0.0))
+    }
+
+    /// Scrolling title, clipped to the granted slot. Short titles sit
+    /// centered; long ones marquee in from the right at MARQ_SPEED, with
+    /// an empty breather before wrapping (wrap lands on empty, no pop).
+    fn draw_marquee(
+        &self,
+        ctx: &Context,
+        theme: &Theme,
+        x0: f64,
+        w: f64,
+        text: &str,
+        tw: f64,
+        th: f64,
+        tyb: f64,
+        t_m: f64,
+        scroll: bool,
+    ) {
+        use cairo::{FontSlant, FontWeight};
+        let _ = ctx.save();
+        ctx.rectangle(x0, 0.0, w, LH);
+        ctx.clip();
+        ctx.select_font_face("Sans", FontSlant::Normal, FontWeight::Bold);
+        ctx.set_font_size(20.0);
+        let y = LH / 2.0 - (th / 2.0 + tyb);
+        set_rgb(ctx, theme.fg);
+        if !scroll {
+            ctx.move_to(x0 + (w - tw) / 2.0, y);
+        } else {
+            let off = (t_m * MARQ_SPEED) % (w + tw + MARQ_BREATHE);
+            ctx.move_to(x0 + w - off, y);
+        }
+        ctx.show_text(text).ok();
+        let _ = ctx.restore();
+    }
+    /// "Title — Artist", title/artist alone, or the helper feed label.
+    /// `None` = nothing to show (stay on the visualizer).
+    fn marquee_text(&self) -> Option<String> {
+        if let Some((t, a)) = track_info() {
+            let (t, a) = (t.trim(), a.trim());
+            if !t.is_empty() && !a.is_empty() {
+                return Some(format!("{t} — {a}"));
+            } else if !t.is_empty() {
+                return Some(t.to_string());
+            } else if !a.is_empty() {
+                return Some(a.to_string());
+            }
+        }
+        let label = self
+            .feed
+            .as_ref()
+            .map(|f| f.label.trim().to_string())
+            .unwrap_or_default();
+        if label.is_empty() {
+            None
+        } else {
+            Some(label)
+        }
+    }
+
+}
+
+/// Marquee scroll: px per second, and empty px before wrapping.
+const MARQ_SPEED: f64 = 45.0;
+const MARQ_BREATHE: f64 = 80.0;
+
 impl CenterPlugin for LevelsPlugin {
     fn center(&self) -> Center {
         Center::Levels
@@ -824,11 +964,42 @@ impl CenterPlugin for LevelsPlugin {
     fn available(&self) -> bool {
         self.playing
     }
-    /// Audio visualizer: vertical bars in three styles (tap cycles).
-    /// The bar never captures audio: a helper app pushes normalized
-    /// levels; here they are just drawn, decaying stale frames.
+    /// Audio visualizer, rotating with the now-playing title: `viz_secs`
+    /// of bars per cycle, then `marquee_secs` of scrolling title
+    /// (`marquee_secs = 0` disables the title). The bar never captures
+    /// audio: a helper app pushes normalized levels; here they are just
+    /// drawn, decaying stale frames.
     /// Falls back to a gentle idle wave when playing with no fresh feed.
     fn draw(&self, ctx: &Context, theme: &Theme, x0: f64, w: f64) {
+        // now-playing rotation (MARQUEE_DEBUG pins a phase for previews).
+        // The title phase always runs one full scroll pass; a zero
+        // marquee_secs (or no title) means visualizer only.
+        let force = std::env::var("MARQUEE_DEBUG")
+            .ok()
+            .map(|s| s.trim().to_lowercase())
+            .unwrap_or_default();
+        if force != "viz" && self.marquee_secs > 0.0 {
+            if let Some(text) = self.marquee_text() {
+                use cairo::{FontSlant, FontWeight};
+                ctx.select_font_face("Sans", FontSlant::Normal, FontWeight::Bold);
+                ctx.set_font_size(20.0);
+                let (tw, th, tyb) = ctx
+                    .text_extents(&text)
+                    .map(|e| (e.width(), e.height(), e.y_bearing()))
+                    .unwrap_or((0.0, 0.0, 0.0));
+                let scroll = tw > w;
+                let (show, t_m) = if force == "marquee" {
+                    (true, now_secs())
+                } else {
+                    self.rotation(&text, tw, w)
+                };
+                if show {
+                    self.draw_marquee(ctx, theme, x0, w, &text, tw, th, tyb, t_m, scroll);
+                    return;
+                }
+            }
+        }
+        let wall = now_secs();
         let n = 24;
         let gap = 4.0;
         let bw = ((w - (n as f64 - 1.0) * gap) / n as f64).clamp(3.0, 8.0);
@@ -838,7 +1009,6 @@ impl CenterPlugin for LevelsPlugin {
         // grow upward like a real visualizer.
         let baseline = LH - 8.0;
         let max_h = LH - 18.0;
-        let wall = now_secs();
         let vals = self.values(n, wall);
         match self.style {
             VizStyle::Bars => {

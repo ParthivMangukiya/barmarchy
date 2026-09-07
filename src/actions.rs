@@ -161,6 +161,16 @@ pub fn mpris_status() -> Option<String> {
     }
 }
 
+/// True while the Omarchy shell lock screen is up (`omarchy-shell lock
+/// isLocked`, backed by the shell's session-lock state — there is no
+/// hyprlock process on this setup). Fail-open on any error. Forks, so
+/// the live loop polls it at ~1Hz, not per frame.
+pub fn session_locked() -> bool {
+    run_out(&["omarchy-shell", "lock", "isLocked"], 5)
+        .trim()
+        .eq_ignore_ascii_case("true")
+}
+
 pub fn mpris_toggle() {
     for bus in mpris_players() {
         spawn(&[
@@ -173,6 +183,65 @@ pub fn mpris_toggle() {
             "PlayPause",
         ]);
     }
+}
+
+/// (title, artist) of the first Playing player, "" when unknown.
+/// busctl prints `a{sv}` maps (one line or many — players disagree);
+/// this takes the first quoted string after each key.
+pub fn mpris_metadata() -> Option<(String, String)> {
+    for bus in mpris_players() {
+        let st = run_out(
+            &[
+                "busctl",
+                "--user",
+                "get-property",
+                &bus,
+                "/org/mpris/MediaPlayer2",
+                "org.mpris.MediaPlayer2.Player",
+                "PlaybackStatus",
+            ],
+            5,
+        );
+        if !st.contains("\"Playing\"") {
+            continue;
+        }
+        let out = run_out(
+            &[
+                "busctl",
+                "--user",
+                "get-property",
+                &bus,
+                "/org/mpris/MediaPlayer2",
+                "org.mpris.MediaPlayer2.Player",
+                "Metadata",
+            ],
+            5,
+        );
+        let title = value_for(&out, "xesam:title");
+        let artist = value_for(&out, "xesam:artist");
+        if !title.is_empty() || !artist.is_empty() {
+            return Some((title, artist));
+        }
+    }
+    None
+}
+
+/// Value of `"key"` in a busctl `a{sv}` dump: first quoted string after
+/// the key, wherever it sits. Players disagree on layout — cliamp puts
+/// the whole dict on one line, browsers spread it over many.
+fn value_for(out: &str, key: &str) -> String {
+    let pat = format!("\"{key}\"");
+    let Some(pos) = out.find(&pat) else {
+        return String::new();
+    };
+    first_quoted(&out[pos + pat.len()..])
+}
+
+/// First `"..."` string in `s`.
+fn first_quoted(s: &str) -> String {
+    let mut parts = s.split('"');
+    parts.next();
+    parts.next().unwrap_or("").into()
 }
 
 // --- app launcher ---
