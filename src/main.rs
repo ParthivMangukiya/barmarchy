@@ -680,7 +680,10 @@ fn run_live(cfg: &config::Config, lay: &mut render::Layout, drm: &mut drm::DrmBa
             }
         }
 
-        // saver animates every frame and wins over all other views
+        // saver animates every frame and wins over all other views.
+        // While it runs, nothing else may touch the panel: skip the
+        // deck timers and the normal render below, or they would blit
+        // the regular bar over the saver (visible flicker).
         if saver_on {
             if let Some(sv) = saver.as_mut() {
                 let dt = last_frame.elapsed().as_secs_f64().min(0.25);
@@ -692,6 +695,7 @@ fn run_live(cfg: &config::Config, lay: &mut render::Layout, drm: &mut drm::DrmBa
                 }
             }
             dirty = false;
+            continue;
         }
 
         // Center deck animates while visible: pet at 1fps, levels at ~30fps.
