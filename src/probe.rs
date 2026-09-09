@@ -71,6 +71,9 @@ fn event_nodes() -> Vec<String> {
 
 /// Touch device: name contains "Touch Bar" (model-specific prefix, e.g.
 /// "MacBookPro17,1 Touch Bar"). Returns (node, x_max, y_max).
+/// Returns None (instead of guessing) when the device is absent or
+/// unreadable, so callers fail loudly with a non-zero exit rather than
+/// driving the wrong /dev node.
 pub fn touch_device() -> Option<(String, f64, f64)> {
     if let Ok(p) = std::env::var("BARMARCHY_TOUCH") {
         if !p.is_empty() {
@@ -79,19 +82,34 @@ pub fn touch_device() -> Option<(String, f64, f64)> {
             return Some((p, x, y));
         }
     }
-    for node in event_nodes() {
-        if let Some(name) = dev_name(&node) {
+    let nodes = event_nodes();
+    if nodes.is_empty() {
+        eprintln!("probe: no /dev/input/event* nodes found (is udev running?)");
+        return None;
+    }
+    let mut readable = 0usize;
+    for node in &nodes {
+        if let Some(name) = dev_name(node) {
+            readable += 1;
             if name.contains("Touch Bar") {
-                let x = abs_max(&node, 0).unwrap_or(23044.0);
-                let y = abs_max(&node, 1).unwrap_or(639.0);
+                let x = abs_max(node, 0).unwrap_or(23044.0);
+                let y = abs_max(node, 1).unwrap_or(639.0);
                 eprintln!("probe: touch = {node} (\"{name}\", {x:.0}x{y:.0})");
-                return Some((node, x, y));
+                return Some((node.clone(), x, y));
             }
         }
     }
-    // legacy fallback (J293): /dev/input/event3
-    eprintln!("probe: no 'Touch Bar' input found, falling back to /dev/input/event3");
-    Some(("/dev/input/event3".into(), 23044.0, 639.0))
+    if readable == 0 {
+        eprintln!(
+            "probe: cannot open any of {} input nodes (permission? need udev uaccess rule or 'input' group; see udev/99-barmarchy-touchbar.rules)",
+            nodes.len()
+        );
+        return None;
+    }
+    eprintln!(
+        "probe: no 'Touch Bar' input found among {readable} readable nodes (override with BARMARCHY_TOUCH=/dev/input/eventN)"
+    );
+    None
 }
 
 /// Keyboard: "Apple SPI Keyboard" holds Fn/Super/Shift on Asahi.

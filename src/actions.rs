@@ -19,19 +19,25 @@ fn spawn(args: &[&str]) {
     if args.is_empty() {
         return;
     }
-    let _ = Command::new(args[0])
+    if let Ok(child) = Command::new(args[0])
         .args(&args[1..])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn();
+        .spawn()
+    {
+        crate::omarchy_env::detach(child);
+    }
 }
 
 pub fn spawn_shell(cmd: &str) {
-    let _ = Command::new("sh")
+    if let Ok(child) = Command::new("sh")
         .args(["-c", cmd])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn();
+        .spawn()
+    {
+        crate::omarchy_env::detach(child);
+    }
 }
 
 // --- sliders ---

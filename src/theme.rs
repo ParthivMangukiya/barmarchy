@@ -36,8 +36,13 @@ fn fallback(key: &str) -> String {
 
 fn theme_bases() -> Vec<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
+    // System dir follows OMARCHY_PATH like omarchy's own helpers do
+    // (omarchy_env::ensure sets it at startup; dev-link overrides honored).
+    let system = std::env::var("OMARCHY_PATH")
+        .map(|p| format!("{}/themes", p.trim_end_matches('/')))
+        .unwrap_or_else(|_| "/usr/share/omarchy/themes".into());
     vec![
-        PathBuf::from("/usr/share/omarchy/themes"),
+        PathBuf::from(system),
         PathBuf::from(format!("{home}/.config/omarchy/themes")),
     ]
 }
@@ -176,11 +181,16 @@ pub fn current_theme() -> String {
 }
 
 pub fn set_theme(name: &str) {
-    let _ = Command::new("omarchy")
+    // Detached: theme switching runs long post-hooks (retints, preloads).
+    // Reaped on a side thread so the child never lingers as a zombie.
+    if let Ok(child) = Command::new("omarchy")
         .args(["theme", "set", name])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn();
+        .spawn()
+    {
+        crate::omarchy_env::detach(child);
+    }
 }
 
 pub fn fav_path() -> PathBuf {

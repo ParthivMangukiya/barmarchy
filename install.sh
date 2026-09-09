@@ -34,6 +34,9 @@ if $UNINSTALL; then
   systemctl --user disable --now omarchy-touchbar.service 2>/dev/null || true
   rm -f "$UNIT" "$BIN"
   systemctl --user daemon-reload 2>/dev/null || true
+  echo "==> removing udev rule (needs sudo)"
+  sudo rm -f /etc/udev/rules.d/99-barmarchy-touchbar.rules 2>/dev/null || true
+  sudo udevadm control --reload-rules 2>/dev/null || true
   echo "==> restoring stock tiny-dfr (needs sudo)"
   sudo systemctl unmask tiny-dfr.service 2>/dev/null || true
   sudo systemctl enable --now tiny-dfr.service 2>/dev/null || true
@@ -80,8 +83,9 @@ After=default.target
 [Service]
 ExecStart=$BIN
 Restart=always
-RestartSec=1
-# needs DRM + input devices (user must be in video,input groups)
+RestartSec=5
+# needs DRM device (user must be in video group); Touch Bar input comes from
+# the udev rule installed below (video group), input group is a fallback
 
 [Install]
 WantedBy=default.target
@@ -97,6 +101,14 @@ for g in video input; do
     need_relogin=true
   fi
 done
+
+# --- udev rule (input access tied to the stable video group, survives group resets) ---
+if [[ -f "$SRC/udev/99-barmarchy-touchbar.rules" ]]; then
+  echo "==> installing udev rule (needs sudo)"
+  sudo install -m644 "$SRC/udev/99-barmarchy-touchbar.rules" /etc/udev/rules.d/99-barmarchy-touchbar.rules
+  sudo udevadm control --reload-rules
+  sudo udevadm trigger --subsystem-match=input --action=change 2>/dev/null || true
+fi
 
 # --- replace stock tiny-dfr ---
 if systemctl list-unit-files tiny-dfr.service >/dev/null 2>&1; then

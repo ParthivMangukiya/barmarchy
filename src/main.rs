@@ -17,6 +17,7 @@ mod drm;
 mod hypr;
 mod icons;
 mod deck;
+mod omarchy_env;
 mod probe;
 mod render;
 mod saver;
@@ -59,7 +60,7 @@ fn open_dev(path: &str) -> Option<RawFd> {
     let path_c = std::ffi::CString::new(path).ok()?;
     let fd = unsafe { libc::open(path_c.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
     if fd < 0 {
-        eprintln!("input: cannot open {path}");
+        eprintln!("input: cannot open {path} (permission? need udev uaccess rule or 'input' group)");
         None
     } else {
         Some(fd)
@@ -77,6 +78,9 @@ fn open_kbd() -> Option<RawFd> {
 }
 
 fn main() {
+    // systemd never sources ~/.bashrc: without this, spawned omarchy
+    // helpers miss OMARCHY_PATH (theme set/list break) — see omarchy_env.
+    omarchy_env::ensure();
     let args: Vec<String> = std::env::args().collect();
     let mut live_secs: Option<f64> = None; // None = forever
     let mut probe = false;
@@ -277,7 +281,10 @@ fn run_saver_preview(drm: &mut drm::DrmBackend, secs: f64) {
 }
 
 fn run_probe(secs: f64) {
-    let Some((tfd, x_max, y_max)) = open_touch() else { return };
+    let Some((tfd, x_max, y_max)) = open_touch() else {
+        eprintln!("probe: no usable touch device, exiting 1");
+        std::process::exit(1);
+    };
     let mut touch = TouchState::new(true);
     eprintln!("probe: tap the bar, coordinates print below");
     let end = Instant::now() + Duration::from_secs_f64(secs);
@@ -363,8 +370,14 @@ fn drain_keys(fd: RawFd) -> Vec<(u16, u16, i32)> {
 fn run_live(cfg: &config::Config, lay: &mut render::Layout, drm: &mut drm::DrmBackend, live_secs: Option<f64>) {
     use touch::{EV_KEY, KEY_CAPSLOCK, KEY_FN, KEY_LCTRL, KEY_LMETA, KEY_LSHIFT, KEY_RCTRL, KEY_RMETA, KEY_RSHIFT};
 
-    let Some((tfd, x_max, y_max)) = open_touch() else { return };
+    let Some((tfd, x_max, y_max)) = open_touch() else {
+        eprintln!("live: no usable touch device, exiting 1 (systemd will retry with backoff)");
+        std::process::exit(1);
+    };
     let kfd = open_kbd();
+    if kfd.is_none() {
+        eprintln!("kbd: no keyboard device, continuing without Fn/Super/Shift layers");
+    }
     let mut touch = TouchState::new(true);
 
     let mut focused = hypr::active_workspace();

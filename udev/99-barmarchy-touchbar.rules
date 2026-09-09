@@ -1,0 +1,15 @@
+# barmarchy — Touch Bar input access without depending on static
+# 'input' group membership (which can silently vanish across updates).
+#
+# NOTE: TAG+="uaccess" alone is NOT enough here: this panel reports
+# ID_SEAT=seat-touchbar, which logind doesn't know as a seat, so no
+# uaccess ACL is ever granted (verified via getfacl). The GROUP="video"
+# assignment below does the real work — video membership is required
+# for the DRM panel anyway, so it stays stable. uaccess is kept as a
+# harmless best-effort in case seat assignment ever changes.
+SUBSYSTEM=="input", ATTRS{name}=="*Touch Bar*", GROUP="video", MODE="0660", TAG+="uaccess"
+# The Apple SPI keyboard stays on the default input group (it carries
+# real keystrokes, so we deliberately do NOT widen it to video). The
+# daemon treats the keyboard as optional: without it the bar still runs,
+# only the Fn/Super/Shift overlay layers are dead.
+SUBSYSTEM=="input", ATTRS{name}=="Apple SPI Keyboard", TAG+="uaccess"

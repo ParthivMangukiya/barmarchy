@@ -20,8 +20,13 @@ Requirements: Apple Silicon MacBook Pro with Touch Bar running
 Asahi/Omarchy (M1 13" J293 verified; M2 13" J493 uses the same panel and is
 expected to work — please report). No hardcoded `/dev` nodes: the daemon
 probes at startup for the 2008x60 DRM panel, the `* Touch Bar` input, its
-live touch ranges, and the `Apple SPI Keyboard`. User must be in `video` +
-`input` groups (the installer adds you; log out/in once if it did). The installer builds the release binary,
+live touch ranges, and the `Apple SPI Keyboard`. User must be in the
+`video` group (the installer adds you; log out/in once if it did) — that
+covers both the DRM panel and the Touch Bar input via
+`udev/99-barmarchy-touchbar.rules`, which assigns the `* Touch Bar`
+device to `video` (`input` group still works as a fallback;
+`uaccess` alone can't cover this panel since it reports
+`ID_SEAT=seat-touchbar`, which logind knows no seat for). The installer builds the release binary,
 installs `~/.local/bin/omarchy-touchbar`, enables the user service, and
 masks stock `tiny-dfr`. Uninstall: `./install.sh --uninstall`.
 
